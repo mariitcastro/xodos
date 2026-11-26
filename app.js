@@ -40,6 +40,11 @@ async function installApp() {
 }
 
 /* ---------------- utilidades ---------------- */
+// ignora null/false ao montar listas de elementos (evita aparecer "null" na tela)
+for (const fn of ['replaceChildren', 'append', 'prepend']) {
+  const orig = Element.prototype[fn];
+  Element.prototype[fn] = function (...k) { return orig.apply(this, k.filter(x => x != null && x !== false)); };
+}
 const NS = 'http://www.w3.org/2000/svg';
 function el(tag, props, ...kids) {
   const e = document.createElement(tag);
@@ -567,7 +572,8 @@ function renderVoicePanel() {
     el('div', { class: 'row' },
       el('button', { class: 'icon-btn' + (V.muted ? ' on' : ''), title: 'Microfone', 'aria-label': 'Microfone', onclick: toggleMute }, icon(V.muted ? 'i-mic-off' : 'i-mic')),
       el('button', { class: 'icon-btn' + (V.deaf ? ' on' : ''), title: 'Som', 'aria-label': 'Som', onclick: toggleDeaf }, icon(V.deaf ? 'i-head-off' : 'i-head')),
-      el('button', { class: 'icon-btn' + (V.screen ? ' on' : ''), title: 'Compartilhar tela', 'aria-label': 'Compartilhar tela', onclick: toggleScreen }, icon('i-screen')))));
+      el('button', { class: 'icon-btn' + (V.screen ? ' on' : ''), title: 'Compartilhar tela', 'aria-label': 'Compartilhar tela', onclick: toggleScreen }, icon('i-screen')),
+      el('button', { class: 'icon-btn', title: 'Configurar voz', 'aria-label': 'Configurar voz', onclick: openVoiceSettings }, icon('i-gear')))));
 }
 function renderMeBar() {
   const me = st.profiles.get(st.uid) || st.me;
@@ -678,8 +684,11 @@ function appendMessage(m) {
 function msgEl(m, prev) {
   const uid = authorOf(m), p = st.profiles.get(uid), dm = !!m.thread_id;
   if (m.kind === 'join') return joinEl(m);
-  const first = !prev || prev.kind === 'join' || authorOf(prev) !== uid || new Date(m.created_at) - new Date(prev.created_at) > 5 * 60e3;
-  const row = el('div', { class: 'msg' + (first ? ' first' : ''), 'data-id': m.id });
+  const replyId = dm ? null : m.reply_to;
+  const first = !!replyId || !prev || prev.kind === 'join' || authorOf(prev) !== uid || new Date(m.created_at) - new Date(prev.created_at) > 5 * 60e3;
+  const row = el('div', { class: 'msg' + (first ? ' first' : '') + (replyId ? ' has-reply' : ''), 'data-id': m.id });
+  if (replyId) row.append(replyRefEl(replyId, false, null));
+  if (!dm && uid !== st.uid && repliesToMe(m)) row.classList.add('mentioned');
   if (first) row.append(el('div', { onclick: () => openProfile(uid) }, avatarEl(p, 42)), el('div', { class: 'meta' },
     el('b', { text: p ? p.display_name : 'Alguém que saiu', style: `color:${dm ? nameColor(uid) : userColor(uid, (serverOf(m.channel_id) || {}).id)}`, onclick: () => openProfile(uid) }),
     el('time', { text: fmtTime(m.created_at), datetime: m.created_at })));
@@ -700,6 +709,7 @@ function msgEl(m, prev) {
     decryptDm(m, t).then(obj => {
       if (!obj) { body.textContent = '🔒 Esta mensagem foi trancada com chaves antigas e não pode mais ser lida.'; media.remove(); return; }
       body.classList.remove('locked');
+      if (obj.r && !row.querySelector('.reply-ref')) { row.classList.add('has-reply'); row.prepend(replyRefEl(obj.r, true, t)); if (!row.classList.contains('first')) { row.classList.add('first'); row.insertBefore(el('div', { class: 'meta' }, el('b', { text: p ? p.display_name : '', style: `color:${nameColor(uid)}` }), el('time', { text: fmtTime(m.created_at) })), body); row.insertBefore(el('div', { onclick: () => openProfile(uid) }, avatarEl(p, 42)), row.querySelector('.meta')); } }
       fill(obj.t, obj.att ? dmAttachmentUrl(obj.att, t, m) : null, obj.gif);
     });
   }
@@ -710,14 +720,16 @@ function msgEl(m, prev) {
     lp = setTimeout(() => { lp = null; row.classList.add('pressed'); if (navigator.vibrate) navigator.vibrate(12); msgSheet(m, row, uid, canDelete); }, 450);
   }, { passive: true });
   ['touchend', 'touchmove', 'touchcancel'].forEach(ev => row.addEventListener(ev, () => clearTimeout(lp), { passive: true }));
+  const tools = el('div', { class: 'tools' }, el('button', { class: 'reply-btn', title: 'Responder', 'aria-label': 'Responder', onclick: () => startReply(m) }, icon('i-reply'), el('span', { text: 'Responder' })));
   if (canDelete) {
     const del = el('button', { title: 'Apagar mensagem', 'aria-label': 'Apagar mensagem' }, icon('i-trash'), el('span', { text: 'Apagar' }));
     del.onclick = async () => {
       if (!del.dataset.sure) { del.dataset.sure = '1'; del.lastChild.textContent = 'Apagar mesmo?'; setTimeout(() => { if (del.isConnected) { delete del.dataset.sure; del.lastChild.textContent = 'Apagar'; } }, 3500); return; }
       del.disabled = true; deleteMessage(m);
     };
-    row.append(el('div', { class: 'tools' }, del));
+    tools.append(del);
   }
+  row.append(tools);
   return row;
 }
 function joinEl(m) {
@@ -786,12 +798,63 @@ function dmAttachmentUrl(att, t, m) {
   blobCache.set(att.path, p); return p;
 }
 
+
+/* ---------------- responder mensagens ---------------- */
+const refCache = new Map();
+function findLoaded(id) { for (const box of st.msgs.values()) { const m = box.list.find(x => x.id === id); if (m) return m; } return null; }
+async function getRef(id, dm, thread) {
+  const hit = findLoaded(id); if (hit) return hit;
+  if (!refCache.has(id)) refCache.set(id, (async () => {
+    const { data } = await sb.from(dm ? 'dm_messages' : 'messages').select('*').eq('id', id).maybeSingle();
+    return data || null;
+  })().catch(() => null));
+  return refCache.get(id);
+}
+async function refSnippet(r, dm, thread) {
+  if (!r) return { uid: null, text: 'Mensagem apagada' };
+  let text = r.content || '', gif = r.gif_url, att = r.attachment_path;
+  if (dm) { const o = await decryptDm(r, thread); if (!o) return { uid: r.sender_id, text: '🔒 Mensagem trancada' }; text = o.t || ''; gif = o.gif; att = o.att; }
+  if (r.kind === 'join') text = 'chegou no Xodó\'S';
+  return { uid: authorOf(r), text: text ? text.replace(/\s+/g, ' ').slice(0, 120) : att ? '📷 Imagem' : gif ? '🎞️ GIF' : '' };
+}
+function replyRefEl(id, dm, thread) {
+  const box = el('button', { class: 'reply-ref', type: 'button', title: 'Ir para a mensagem original' }, el('span', { class: 'reply-line', 'aria-hidden': 'true' }), el('span', { class: 'muted', text: 'Carregando…' }));
+  box.onclick = () => jumpTo(id);
+  getRef(id, dm, thread).then(r => refSnippet(r, dm, thread)).then(sn => {
+    const p = sn.uid && st.profiles.get(sn.uid);
+    box.replaceChildren(el('span', { class: 'reply-line', 'aria-hidden': 'true' }), p ? avatarEl(p, 16) : null,
+      p ? el('b', { text: p.display_name, style: `color:${userColor(sn.uid, (serverOf(st.view && st.view.id) || {}).id)}` }) : null,
+      el('span', { class: 'reply-text', text: sn.text }));
+  });
+  return box;
+}
+function jumpTo(id) {
+  const node = document.querySelector(`#feed [data-id="${CSS.escape(id)}"]`);
+  if (!node) return toast('Essa mensagem é mais antiga. Toque em "Carregar mensagens antigas" lá em cima.');
+  node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  node.classList.remove('flash'); void node.offsetWidth; node.classList.add('flash');
+}
+function startReply(m) {
+  if (!st.composer || !st.view || vkey(st.view) !== (m.thread_id ? 'd:' + m.thread_id : 'c:' + m.channel_id)) return;
+  st.composer.setReply(m);
+}
+function repliesToMe(m) {
+  const r = m.reply_to ? findLoaded(m.reply_to) : null;
+  return !!r && authorOf(r) === st.uid;
+}
+
 /* ---------------- escrever ---------------- */
 function composer(v, placeholder) {
-  let file = null;
+  let file = null, replyTo = null;
   const ta = el('textarea', { rows: '1', placeholder, 'aria-label': placeholder, maxlength: '4000' });
   const fileIn = el('input', { type: 'file', accept: IMG_TYPES.join(','), hidden: true });
   const prev = el('div', { class: 'preview-att', hidden: true });
+  const replyBar = el('div', { class: 'reply-bar', hidden: true });
+  const setReply = m => {
+    replyTo = m || null; replyBar.hidden = !replyTo;
+    if (replyTo) { const who = st.profiles.get(authorOf(replyTo)); replyBar.replaceChildren(el('span', {}, 'Respondendo a ', el('b', { text: who ? who.display_name : 'alguém' })), el('button', { class: 'icon-btn', 'aria-label': 'Cancelar resposta', onclick: () => setReply(null) }, icon('i-x'))); ta.focus(); }
+  };
+  st.composer = { setReply };
   const sendBtn = el('button', { class: 'icon-btn', title: 'Enviar', 'aria-label': 'Enviar' }, icon('i-send'));
   const setFile = f => {
     if (f && !checkImage(f, 8)) return;
@@ -804,17 +867,18 @@ function composer(v, placeholder) {
     if (!text && !file && !gif) return;
     sendBtn.disabled = true;
     try {
-      await sendMessage(v, text, gif ? null : file, gif || null);
+      await sendMessage(v, text, gif ? null : file, gif || null, replyTo ? replyTo.id : null);
+      setReply(null);
       if (!gif) { ta.value = ''; setFile(null); ta.style.height = ''; }
     } catch (e) { console.error(e); toast(e.userMsg || 'Não deu para enviar. Tente de novo.'); }
     sendBtn.disabled = false; ta.focus();
   };
-  ta.addEventListener('keydown', e => { if (ta.dataset.mpOpen === '1') return; if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+  ta.addEventListener('keydown', e => { if (e.key === 'Escape' && replyTo && ta.dataset.mpOpen !== '1') { setReply(null); return; } if (ta.dataset.mpOpen === '1') return; if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
   ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 180) + 'px'; });
   ta.addEventListener('paste', e => { const f = [...(e.clipboardData && e.clipboardData.files || [])].find(f => f.type.startsWith('image/')); if (f) { e.preventDefault(); setFile(f); } });
   fileIn.onchange = () => { setFile(fileIn.files[0]); fileIn.value = ''; };
   sendBtn.onclick = () => send();
-  const wrap = el('div', { class: 'composer' }, prev, el('div', { class: 'cbox' },
+  const wrap = el('div', { class: 'composer' }, replyBar, prev, el('div', { class: 'cbox' },
     el('button', { class: 'icon-btn', title: 'Enviar foto ou GIF do aparelho', 'aria-label': 'Enviar foto', onclick: () => fileIn.click() }, icon('i-image')),
     ta,
     el('button', { class: 'icon-btn', title: 'Buscar GIF', 'aria-label': 'Buscar GIF', onclick: () => gifPicker(wrap, url => send(url)) }, el('span', { class: 'gif-tag', text: 'GIF' })),
@@ -825,11 +889,11 @@ function composer(v, placeholder) {
   main.ondrop = e => { e.preventDefault(); const f = [...e.dataTransfer.files].find(f => f.type.startsWith('image/')); if (f) setFile(f); };
   return wrap;
 }
-async function sendMessage(v, text, file, gif) {
+async function sendMessage(v, text, file, gif, replyTo) {
   if (v.kind === 'channel') {
     let path = null;
     if (file) { path = `${st.uid}/${uuid()}.${extOf(file)}`; const { error } = await sb.storage.from('media').upload(path, file, { contentType: file.type }); if (error) throw error; }
-    const { data, error } = await sb.from('messages').insert({ channel_id: v.id, author_id: st.uid, content: text, attachment_path: path, gif_url: gif }).select().single();
+    const { data, error } = await sb.from('messages').insert({ channel_id: v.id, author_id: st.uid, content: text, attachment_path: path, gif_url: gif, reply_to: replyTo || null }).select().single();
     if (error) { if (path) sb.storage.from('media').remove([path]); throw error; }
     addIncoming(data);
     return;
@@ -839,6 +903,7 @@ async function sendMessage(v, text, file, gif) {
   const key = await dmKey(t.id, st.priv.keyId, other.current_key_id);
   if (!key) { const e = new Error('key'); e.userMsg = 'Não deu para criar a chave desta conversa.'; throw e; }
   const payload = { t: text };
+  if (replyTo) payload.r = replyTo;
   let path = null;
   if (gif) payload.gif = gif;
   if (file) {
@@ -863,7 +928,7 @@ function addIncoming(m) {
   else if (authorOf(m) !== st.uid) {
     st.unread.add(k);
     const sv = m.channel_id ? serverOf(m.channel_id) : null;
-    if (m.channel_id && m.kind !== 'join' && mentionsMe(m.content, sv, m.author_id)) { st.mentions.set(k, (st.mentions.get(k) || 0) + 1); chime([988, 1319, 988]); }
+    if (m.channel_id && m.kind !== 'join' && (mentionsMe(m.content, sv, m.author_id) || repliesToMe(m))) { st.mentions.set(k, (st.mentions.get(k) || 0) + 1); chime([988, 1319, 988]); }
     else if (m.thread_id) chime([880, 1175]);
     renderRail(); renderSide(); updateTitle();
   }
@@ -907,6 +972,7 @@ function actionSheet(preview, actions, onClose) {
 }
 function msgSheet(m, row, uid, canDelete) {
   const acts = [];
+  acts.push({ label: 'Responder', icon: 'i-reply', run: () => startReply(m) });
   if (row._text) acts.push({ label: 'Copiar texto', icon: 'i-chat', run: () => copyText(row._text) });
   if (uid !== 'kaka') acts.push({ label: 'Ver perfil de ' + nameOf(uid), icon: 'i-users', run: () => openProfile(uid) });
   if (canDelete) acts.push({ label: 'Apagar mensagem', icon: 'i-trash', danger: true, run: () =>
@@ -1055,9 +1121,9 @@ function pickDmPerson() {
 function openSettings(tab = 'perfil') {
   const body = el('div', { class: 'field', style: 'gap:16px' });
   const tabs = el('div', { class: 'tabs' });
-  const show = t => { tabs.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.t === t)); body.replaceChildren(t === 'perfil' ? profileEditor() : t === 'aparencia' ? themePanel() : accountPanel()); };
-  tabs.append(el('button', { 'data-t': 'perfil', text: 'Meu perfil', onclick: () => show('perfil') }), el('button', { 'data-t': 'aparencia', text: 'Aparência', onclick: () => show('aparencia') }), el('button', { 'data-t': 'conta', text: 'Conta e segurança', onclick: () => show('conta') }));
-  modal('Configurações', el('div', { class: 'field', style: 'gap:16px' }, tabs, body), { wide: true });
+  const show = t => { tabs.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.dataset.t === t)); if (body.firstChild && body.firstChild._cleanup) body.firstChild._cleanup(); body.replaceChildren(t === 'perfil' ? profileEditor() : t === 'aparencia' ? themePanel() : t === 'voz' ? voicePanel() : accountPanel()); };
+  tabs.append(el('button', { 'data-t': 'perfil', text: 'Meu perfil', onclick: () => show('perfil') }), el('button', { 'data-t': 'aparencia', text: 'Aparência', onclick: () => show('aparencia') }), el('button', { 'data-t': 'voz', text: 'Voz e áudio', onclick: () => show('voz') }), el('button', { 'data-t': 'conta', text: 'Conta e segurança', onclick: () => show('conta') }));
+  modal('Configurações', el('div', { class: 'field', style: 'gap:16px' }, tabs, body), { wide: true, onClose: () => { if (body.firstChild && body.firstChild._cleanup) body.firstChild._cleanup(); } });
   show(tab);
 }
 function profileEditor() {
@@ -1156,6 +1222,135 @@ function accountPanel() {
     delIn, del);
 }
 
+
+
+/* ---------------- voz e áudio: configurações ---------------- */
+const VOICE_DEFAULT = { input: '', output: '', mode: 'voice', noise: true, echo: true, agc: true, gateAuto: true, gate: -55, inVol: 1, outVol: 1 };
+function voiceCfg() { try { return Object.assign({}, VOICE_DEFAULT, JSON.parse(localStorage.getItem('xodos-voice') || '{}')); } catch { return { ...VOICE_DEFAULT }; } }
+function saveVoiceCfg(c) { try { localStorage.setItem('xodos-voice', JSON.stringify(c)); } catch {} }
+const canPickOutput = () => 'setSinkId' in HTMLMediaElement.prototype;
+function micConstraints(c) {
+  const hq = c.mode === 'hq';
+  return { deviceId: c.input ? { ideal: c.input } : undefined, echoCancellation: hq ? false : c.echo, noiseSuppression: c.noise, autoGainControl: hq ? false : c.agc,
+    channelCount: hq ? { ideal: 2 } : { ideal: 1 }, sampleRate: { ideal: 48000 }, sampleSize: { ideal: 16 } };
+}
+// microfone → volume → (portão de sensibilidade) → saída processada que vai para a chamada
+async function buildMic() {
+  const c = voiceCfg();
+  const raw = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(c) });
+  const a = ac();
+  const src = a.createMediaStreamSource(raw), gain = a.createGain(), gate = a.createGain(), an = a.createAnalyser(), dest = a.createMediaStreamDestination();
+  an.fftSize = 1024; gain.gain.value = c.inVol;
+  src.connect(gain); gain.connect(an); gain.connect(gate); gate.connect(dest);
+  return { raw, stream: dest.stream, gain, gate, an, buf: new Float32Array(1024), open: true, last: 0 };
+}
+function dbOf(node) { node.an.getFloatTimeDomainData(node.buf); let s = 0; for (const v of node.buf) s += v * v; return 20 * Math.log10(Math.sqrt(s / node.buf.length) + 1e-9); }
+setInterval(() => {
+  const n = V.chain; if (!n) return;
+  const c = V.cfg || voiceCfg(), db = dbOf(n), thr = c.gateAuto ? -52 : c.gate, now = performance.now();
+  n.level = db;
+  if (document.hidden) { if (!n.open) { n.open = true; n.gate.gain.setTargetAtTime(1, n.gate.context.currentTime, .01); } return; }
+  if (db > thr) { n.last = now; if (!n.open) { n.open = true; n.gate.gain.setTargetAtTime(1, n.gate.context.currentTime, .005); } }
+  else if (n.open && now - n.last > 300) { n.open = false; n.gate.gain.setTargetAtTime(0, n.gate.context.currentTime, .03); }
+}, 25);
+// som da chamada com mais qualidade (Opus)
+function opusSdp(sdp) {
+  const hq = (V.cfg || voiceCfg()).mode === 'hq';
+  const m = sdp.match(/a=rtpmap:(\d+) opus\/48000/i); if (!m) return sdp;
+  const pt = m[1], extra = hq ? 'maxaveragebitrate=128000;stereo=1;sprop-stereo=1;useinbandfec=1;usedtx=0' : 'maxaveragebitrate=64000;useinbandfec=1';
+  const re = new RegExp('a=fmtp:' + pt + ' ([^\\r\\n]*)');
+  return re.test(sdp) ? sdp.replace(re, (all, params) => 'a=fmtp:' + pt + ' ' + params.split(';').filter(x => !/^(maxaveragebitrate|stereo|sprop-stereo|useinbandfec|usedtx)=/.test(x.trim())).concat(extra).join(';'))
+    : sdp.replace(m[0], m[0] + '\r\na=fmtp:' + pt + ' ' + extra);
+}
+function applyOutput() {
+  const c = V.cfg || voiceCfg();
+  const els = [...V.audios.values(), ...document.querySelectorAll('.screen video')];
+  for (const a of els) { a.volume = Math.min(1, c.outVol); if (c.output && canPickOutput()) a.setSinkId(c.output).catch(() => {}); }
+}
+async function swapMic() {
+  if (!V.room) return;
+  let next; try { next = await buildMic(); } catch { return toast('Não consegui usar esse microfone.'); }
+  const old = V.chain;
+  V.chain = next; V.mic = next.stream; V.cfg = voiceCfg();
+  for (const call of V.calls.values()) {
+    if (call._kind !== 'voice' || !call.peerConnection) continue;
+    const out = V.mic.clone(); out.getTracks().forEach(t => t.enabled = call._ok ? !V.muted : false);
+    const sender = call.peerConnection.getSenders().find(x => x.track && x.track.kind === 'audio');
+    if (sender) { await sender.replaceTrack(out.getAudioTracks()[0]).catch(() => {}); if (call._out) call._out.getTracks().forEach(t => t.stop()); call._out = out; }
+  }
+  delete meters[st.uid]; watch(V.mic, st.uid); applyMic();
+  if (old) old.raw.getTracks().forEach(t => t.stop());
+}
+function voicePanel() {
+  let c = voiceCfg(), test = null, raf = 0;
+  const box = el('div', { class: 'field', style: 'gap:14px' });
+  const set = (k, v, rebuild) => { c[k] = v; saveVoiceCfg(c); V.cfg = c;
+    if (k === 'inVol') { if (V.chain) V.chain.gain.gain.value = v; if (test) test.gain.gain.value = v; }
+    if (k === 'outVol' || k === 'output') applyOutput();
+    if (rebuild) { if (V.room) swapMic(); if (test) startTest(); }
+    draw(); };
+  const selIn = el('select', { class: 'input', 'aria-label': 'Microfone' }), selOut = el('select', { class: 'input', 'aria-label': 'Saída de som' });
+  const meterFill = el('i'), meterThr = el('b');
+  const meter = el('div', { class: 'vmeter', 'aria-hidden': 'true' }, meterFill, meterThr);
+  const testBtn = el('button', { class: 'btn small' });
+  const fillDevices = async () => {
+    let list = []; try { list = await navigator.mediaDevices.enumerateDevices(); } catch {}
+    const ins = list.filter(d => d.kind === 'audioinput'), outs = list.filter(d => d.kind === 'audiooutput');
+    const label = (d, i, w) => d.label || `${w} ${i + 1}`;
+    selIn.replaceChildren(el('option', { value: '', text: 'Padrão do aparelho' }), ...ins.filter(d => d.deviceId && d.deviceId !== 'default').map((d, i) => el('option', { value: d.deviceId, text: label(d, i, 'Microfone') })));
+    selIn.value = ins.some(d => d.deviceId === c.input) ? c.input : '';
+    selOut.replaceChildren(el('option', { value: '', text: 'Padrão do aparelho' }), ...outs.filter(d => d.deviceId && d.deviceId !== 'default').map((d, i) => el('option', { value: d.deviceId, text: label(d, i, 'Saída') })));
+    selOut.value = outs.some(d => d.deviceId === c.output) ? c.output : '';
+    return ins.some(d => d.label);
+  };
+  selIn.onchange = () => set('input', selIn.value, true);
+  selOut.onchange = () => set('output', selOut.value);
+  const stopTest = () => { cancelAnimationFrame(raf); if (test) test.raw.getTracks().forEach(t => t.stop()); test = null; testBtn.textContent = '🎙️ Testar microfone'; meterFill.style.width = '0%'; };
+  const startTest = async () => {
+    if (test) test.raw.getTracks().forEach(t => t.stop());
+    try { test = await buildMic(); } catch { return toast('Não consegui usar o microfone. Libere o acesso no cadeado ao lado do endereço.'); }
+    await fillDevices(); testBtn.textContent = '⏹️ Parar teste';
+    const loop = () => { if (!test) return; const db = dbOf(test); const pct = Math.max(0, Math.min(100, (db + 90) / 90 * 100)); meterFill.style.width = pct + '%';
+      const thr = c.gateAuto ? -52 : c.gate; meterFill.classList.toggle('open', db > thr); raf = requestAnimationFrame(loop); };
+    loop();
+  };
+  testBtn.onclick = () => test ? stopTest() : startTest();
+  const toggle = (k, title, desc, disabled) => { const cb = el('input', { type: 'checkbox', checked: !!c[k] && !disabled, disabled: !!disabled }); cb.onchange = () => set(k, cb.checked, true);
+    return el('label', { class: 'check' + (disabled ? ' dim' : '') }, cb, el('span', {}, el('b', { text: title }), el('br'), el('small', { class: 'muted', text: desc }))); };
+  const range = (min, max, step, val, fmt, on) => { const r = el('input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(val), class: 'vrange' }); const out = el('span', { class: 'muted', text: fmt(val) }); r.oninput = () => { out.textContent = fmt(+r.value); on(+r.value); }; return el('div', { class: 'vrange-row' }, r, out); };
+  const draw = () => {
+    const hq = c.mode === 'hq', thr = c.gateAuto ? -52 : c.gate;
+    meterThr.style.left = Math.max(0, Math.min(100, (thr + 90) / 90 * 100)) + '%';
+    const modeOpt = (k, title, desc) => el('button', { type: 'button', class: 'theme-opt' + (c.mode === k ? ' active' : ''), role: 'radio', 'aria-checked': String(c.mode === k), onclick: () => set('mode', k, true) }, el('b', { text: title }), el('small', { text: desc }));
+    box.replaceChildren(
+      el('h3', { class: 'section-title', text: 'Aparelhos' }),
+      field('Microfone', selIn),
+      canPickOutput() ? field('Saída de som (fone, caixinha…)', selOut) : el('p', { class: 'muted', style: 'margin:0;font-size:13px', text: 'Neste navegador a saída de som é escolhida pelo próprio aparelho (por exemplo, conectando o fone).' }),
+      el('div', { class: 'field' }, el('span', { class: 'label', text: 'Teste' }), meter, el('div', { class: 'upload-row' }, testBtn),
+        el('small', { class: 'muted', text: 'A barra fica rosa quando o seu som passa para a chamada. O tracinho é a sensibilidade.' })),
+      el('h3', { class: 'section-title', text: 'Modo de áudio' }),
+      el('div', { class: 'theme-grid', role: 'radiogroup', 'aria-label': 'Modo de áudio' },
+        modeOpt('voice', '🗣️ Voz', 'Melhor sem fone. Tira eco e ruído, mas no celular o som fica com cara de ligação.'),
+        modeOpt('hq', '🎧 Alta qualidade', 'Use com fone. Som estéreo e mais nítido, sem o "modo ligação" do celular.')),
+      hq ? el('p', { class: 'vnote', text: 'No modo alta qualidade o cancelamento de eco fica desligado. Sem fone, as pessoas podem ouvir o próprio eco. No iPhone o sistema ainda trata o microfone ligado como chamada, mas o som que você manda fica melhor.' }) : null,
+      el('h3', { class: 'section-title', text: 'Processamento de voz' }),
+      toggle('noise', 'Supressão de ruído', 'Diminui ventilador, teclado, barulho da rua.'),
+      toggle('echo', 'Cancelamento de eco', hq ? 'Desligado no modo alta qualidade.' : 'Evita que as pessoas se ouçam pelo seu alto-falante.', hq),
+      toggle('agc', 'Ganho automático', hq ? 'Desligado no modo alta qualidade.' : 'Ajusta o volume da sua voz sozinho.', hq),
+      el('h3', { class: 'section-title', text: 'Sensibilidade do microfone' }),
+      toggle('gateAuto', 'Automática', 'O microfone só manda som quando você fala.'),
+      c.gateAuto ? null : range(-90, -10, 1, c.gate, v => v + ' dB', v => { c.gate = v; saveVoiceCfg(c); V.cfg = c; meterThr.style.left = ((v + 90) / 90 * 100) + '%'; }),
+      el('h3', { class: 'section-title', text: 'Volume' }),
+      el('div', { class: 'field' }, el('span', { class: 'label', text: 'Volume do meu microfone' }), range(0, 2, .05, c.inVol, v => Math.round(v * 100) + '%', v => { c.inVol = v; saveVoiceCfg(c); V.cfg = c; if (V.chain) V.chain.gain.gain.value = v; if (test) test.gain.gain.value = v; })),
+      el('div', { class: 'field' }, el('span', { class: 'label', text: 'Volume das pessoas' }), range(0, 1, .05, c.outVol, v => Math.round(v * 100) + '%', v => { c.outVol = v; saveVoiceCfg(c); V.cfg = c; applyOutput(); })),
+      el('p', { class: 'muted', style: 'margin:0;font-size:13px', text: 'As configurações ficam salvas neste aparelho e valem na hora, mesmo no meio da chamada.' }));
+    if (!test) testBtn.textContent = '🎙️ Testar microfone';
+  };
+  fillDevices().then(draw); draw();
+  box._cleanup = stopTest;
+  return box;
+}
+function openVoiceSettings() { openSettings('voz'); }
 
 /* ---------------- aparência (claro / escuro) ---------------- */
 function currentTheme() { return document.documentElement.getAttribute('data-theme') || 'dark'; }
@@ -1618,6 +1813,7 @@ function renderRoom() {
         el('button', { class: 'btn' + (V.muted ? ' on' : ''), onclick: toggleMute }, icon(V.muted ? 'i-mic-off' : 'i-mic'), lbl(V.muted ? 'Microfone mudo' : 'Microfone')),
         el('button', { class: 'btn' + (V.deaf ? ' on' : ''), onclick: toggleDeaf }, icon(V.deaf ? 'i-head-off' : 'i-head'), lbl(V.deaf ? 'Som desligado' : 'Som')),
         el('button', { class: 'btn' + (V.screen ? ' on' : ''), onclick: toggleScreen }, icon('i-screen'), lbl(V.screen ? 'Parar tela' : 'Compartilhar tela')),
+        el('button', { class: 'btn', 'aria-label': 'Configurar voz', onclick: openVoiceSettings }, icon('i-gear'), lbl('Áudio')),
         el('button', { class: 'btn danger', 'aria-label': 'Sair da sala', onclick: () => leaveRoom() }, icon('i-hang'), lbl('Sair')))
     : el('div', { class: 'room-bar' }, el('button', { class: 'btn primary', onclick: () => joinRoom(c.id) }, icon('i-speaker'), lbl('Entrar na sala')));
   main.replaceChildren(topBar(el('h1', {}, icon('i-speaker'), c.name), el('div', { class: 'topic', text: here ? 'Use fone de ouvido para não fazer eco.' : people.length ? people.length + ' na sala' : 'A sala está vazia' })),
@@ -1629,9 +1825,9 @@ function renderRoom() {
 async function joinRoom(id) {
   if (V.room === id) return openRoom(id);
   if (V.room) leaveRoom(true);
-  try { V.mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
-  catch { return toast('Não consegui usar o microfone. Libere o acesso no cadeado ao lado do endereço.'); }
   ac();
+  try { V.cfg = voiceCfg(); V.chain = await buildMic(); V.mic = V.chain.stream; }
+  catch { V.chain = null; return toast('Não consegui usar o microfone. Libere o acesso no cadeado ao lado do endereço, ou escolha outro em Configurações → Voz e áudio.'); }
   if (!V.peer || V.peer.destroyed || V.peer.disconnected) {
     const hex = [...rand(12)].map(n => n.toString(16).padStart(2, '0')).join('');
     V.peerId = 'xodos-' + hex;
@@ -1639,7 +1835,7 @@ async function joinRoom(id) {
     V.peer.on('call', onIncomingCall);
     V.peer.on('error', e => { console.warn('peer', e.type); if (e.type === 'network' || e.type === 'server-error') toast('A conexão de voz caiu. Saia e entre de novo na sala.'); });
     await new Promise((res, rej) => { V.peer.once('open', res); setTimeout(() => rej(new Error('timeout')), 15000); }).catch(() => null);
-    if (!V.peer.open) { V.mic.getTracks().forEach(t => t.stop()); V.mic = null; return toast('Não deu para conectar a voz agora. Tente de novo.'); }
+    if (!V.peer.open) { V.chain.raw.getTracks().forEach(t => t.stop()); V.chain = null; V.mic = null; return toast('Não deu para conectar a voz agora. Tente de novo.'); }
   }
   V.room = id; V.muted = false; if (V.deaf) V.deaf = false;
   watch(V.mic, st.uid);
@@ -1648,8 +1844,9 @@ async function joinRoom(id) {
 function leaveRoom(quiet) {
   for (const key of [...V.calls.keys()]) closeVCall(key);
   if (V.mic) V.mic.getTracks().forEach(t => t.stop());
+  if (V.chain) V.chain.raw.getTracks().forEach(t => t.stop());
   if (V.screen) V.screen.getTracks().forEach(t => t.stop());
-  V.mic = null; V.screen = null; V.room = null; V.screens.clear(); delete meters[st.uid];
+  V.chain = null; V.mic = null; V.screen = null; V.room = null; V.screens.clear(); delete meters[st.uid];
   track(); if (!quiet) chime([660, 440]);
   renderVoicePanel(); renderSide(); if (st.view && st.view.kind === 'room') renderRoom();
 }
@@ -1665,7 +1862,7 @@ function syncCalls() {
 }
 function startCall(uid, peerId, kind, stream) {
   const out = stream.clone(); out.getTracks().forEach(t => t.enabled = false);
-  const call = V.peer.call(peerId, out, { metadata: { kind, uid: st.uid } }); if (!call) return;
+  const call = V.peer.call(peerId, out, { metadata: { kind, uid: st.uid }, sdpTransform: kind === 'voice' ? opusSdp : undefined }); if (!call) return;
   const key = uid + (kind === 'voice' ? ':voice' : ':screen-out');
   Object.assign(call, { _out: out, _uid: uid, _kind: kind, _key: key });
   V.calls.set(key, call);
@@ -1679,7 +1876,7 @@ function onIncomingCall(call) {
   const key = uid + (meta.kind === 'voice' ? ':voice' : ':screen-in');
   if (V.calls.has(key)) closeVCall(key);
   Object.assign(call, { _uid: uid, _kind: meta.kind, _key: key });
-  if (meta.kind === 'voice') { const out = V.mic.clone(); out.getTracks().forEach(t => t.enabled = false); call._out = out; call.answer(out); }
+  if (meta.kind === 'voice') { const out = V.mic.clone(); out.getTracks().forEach(t => t.enabled = false); call._out = out; call.answer(out, { sdpTransform: opusSdp }); }
   else call.answer();
   V.calls.set(key, call);
   call.on('stream', s => { call._remote = s; showCall(call); });
@@ -1691,7 +1888,7 @@ function showCall(call) {
   if (!call._ok || !call._remote) return;
   if (call._kind === 'voice') {
     let a = V.audios.get(call._uid); if (!a) { a = el('audio', { autoplay: true }); $('#audios').append(a); V.audios.set(call._uid, a); }
-    a.srcObject = call._remote; a.muted = V.deaf; a.play().catch(() => toast('Toque em qualquer lugar para ouvir a sala.'));
+    a.srcObject = call._remote; a.muted = V.deaf; applyOutput(); a.play().catch(() => toast('Toque em qualquer lugar para ouvir a sala.'));
     watch(call._remote, call._uid);
   } else if (call._key.endsWith('screen-in')) { V.screens.set(call._uid, call._remote); if (st.view && st.view.kind === 'room') renderRoom(); }
 }
