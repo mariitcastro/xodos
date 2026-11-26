@@ -5,7 +5,7 @@
   Permissions-Policy: camera=(), geolocation=(), payment=(), usb=(), microphone=(self), display-capture=(self)
   Strict-Transport-Security: max-age=31536000
   Cross-Origin-Opener-Policy: same-origin
-  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://qhubriemetupphawjyfu.supabase.co https://*.giphy.com; media-src 'self' blob: mediastream: https://*.giphy.com; connect-src 'self' https://qhubriemetupphawjyfu.supabase.co wss://qhubriemetupphawjyfu.supabase.co https://0.peerjs.com wss://0.peerjs.com https://api.giphy.com; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://qhubriemetupphawjyfu.supabase.co https://*.giphy.com; media-src 'self' blob: mediastream: https://*.giphy.com; connect-src 'self' https://qhubriemetupphawjyfu.supabase.co wss://qhubriemetupphawjyfu.supabase.co https://0.peerjs.com wss://0.peerjs.com https://api.giphy.com; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
 
 /
   Content-Type: text/html; charset=utf-8

@@ -95,7 +95,7 @@ function extOf(file) { return { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/
 
 /* sons curtinhos */
 let actx;
-function ac() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch { return null; } } if (actx.state === 'suspended') actx.resume(); return actx; }
+function ac() { if (!actx) { const C = window.AudioContext || window.webkitAudioContext; try { actx = new C({ sampleRate: 48000 }); } catch { try { actx = new C(); } catch { return null; } } } if (actx.state === 'suspended') actx.resume(); return actx; }
 function chime(freqs) {
   const a = ac(); if (!a || V.deaf) return;
   freqs.forEach((f, i) => { const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + i * .09; o.frequency.value = f;
@@ -1225,7 +1225,7 @@ function accountPanel() {
 
 
 /* ---------------- voz e áudio: configurações ---------------- */
-const VOICE_DEFAULT = { input: '', output: '', mode: 'voice', noise: true, echo: true, agc: true, gateAuto: true, gate: -55, inVol: 1, outVol: 1 };
+const VOICE_DEFAULT = { input: '', output: '', mode: 'voice', ai: true, aiIn: true, noise: true, echo: true, agc: true, gateAuto: true, gate: -55, inVol: 1, outVol: 1 };
 function voiceCfg() { try { return Object.assign({}, VOICE_DEFAULT, JSON.parse(localStorage.getItem('xodos-voice') || '{}')); } catch { return { ...VOICE_DEFAULT }; } }
 function saveVoiceCfg(c) { try { localStorage.setItem('xodos-voice', JSON.stringify(c)); } catch {} }
 const canPickOutput = () => 'setSinkId' in HTMLMediaElement.prototype;
@@ -1235,6 +1235,25 @@ function micConstraints(c) {
     channelCount: hq ? { ideal: 2 } : { ideal: 1 }, sampleRate: { ideal: 48000 }, sampleSize: { ideal: 16 } };
 }
 // microfone → volume → (portão de sensibilidade) → saída processada que vai para a chamada
+/* supressão de ruído forte com IA (RNNoise), rodando no próprio aparelho */
+let nsBin = null; const nsReady = new WeakMap();
+async function ensureNs(ctx) {
+  try {
+    if (!ctx || !ctx.audioWorklet || typeof AudioWorkletNode === 'undefined' || typeof WebAssembly === 'undefined' || ctx.state !== 'running') return null;
+    if (!nsBin) {
+      const simd = WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]));
+      nsBin = fetch(simd ? 'vendor/ns/rnnoise_simd.wasm' : 'vendor/ns/rnnoise.wasm').then(r => { if (!r.ok) throw new Error('wasm'); return r.arrayBuffer(); });
+    }
+    if (!nsReady.has(ctx)) nsReady.set(ctx, ctx.audioWorklet.addModule('vendor/ns/rnnoise-worklet.js'));
+    const [bin] = await Promise.all([nsBin, nsReady.get(ctx)]);
+    return bin;
+  } catch (e) { console.warn('rnnoise indisponível', e); nsBin = null; nsReady.delete(ctx); return null; }
+}
+function rnnoiseNode(ctx, bin) {
+  const n = new AudioWorkletNode(ctx, '@sapphi-red/web-noise-suppressor/rnnoise', { processorOptions: { maxChannels: 2, wasmBinary: bin.slice(0) } });
+  n.destroy = () => { try { n.port.postMessage('destroy'); n.disconnect(); } catch {} };
+  return n;
+}
 async function getMicRaw(c) {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { const e = new Error('sem suporte'); e.name = 'NoSupport'; throw e; }
   try { return await navigator.mediaDevices.getUserMedia({ audio: micConstraints(c) }); }
@@ -1255,9 +1274,12 @@ async function buildMic() {
   try {
     const src = a.createMediaStreamSource(raw), gain = a.createGain(), gate = a.createGain(), an = a.createAnalyser(), dest = a.createMediaStreamDestination();
     an.fftSize = 1024; gain.gain.value = c.inVol;
-    src.connect(gain); gain.connect(an); gain.connect(gate); gate.connect(dest);
+    let ns = null;
+    if (c.ai) { const bin = await ensureNs(a); if (bin) { try { ns = rnnoiseNode(a, bin); } catch { ns = null; } } }
+    if (ns) { src.connect(ns); ns.connect(gain); } else src.connect(gain);
+    gain.connect(an); gain.connect(gate); gate.connect(dest);
     if (!dest.stream.getAudioTracks().length) return rawChain(raw);
-    return { raw, stream: dest.stream, gain, gate, an, buf: new Float32Array(1024), open: true, last: 0 };
+    return { raw, stream: dest.stream, gain, gate, an, ns, src, buf: new Float32Array(1024), open: true, last: 0 };
   } catch { return rawChain(raw); }
 }
 function micErrorText(e) {
@@ -1323,6 +1345,7 @@ async function swapMic() {
   }
   delete meters[st.uid]; watch(V.mic, st.uid); applyMic();
   if (old && old.raw !== next.raw) old.raw.getTracks().forEach(t => t.stop());
+  if (old && old.ns) old.ns.destroy();
 }
 function voicePanel() {
   let c = voiceCfg(), test = null, raf = 0;
@@ -1336,6 +1359,8 @@ function voicePanel() {
   const meterFill = el('i'), meterThr = el('b');
   const meter = el('div', { class: 'vmeter', 'aria-hidden': 'true' }, meterFill, meterThr);
   const testBtn = el('button', { class: 'btn small' });
+  const hearBtn = el('button', { class: 'btn small ghost', text: '🎧 Ouvir minha voz' }); let hearEl = null;
+  hearBtn.onclick = () => { if (!test) return toast('Toque em "Testar microfone" primeiro.'); if (hearEl) { hearEl.srcObject = null; hearEl = null; hearBtn.textContent = '🎧 Ouvir minha voz'; return; } hearEl = new Audio(); hearEl.srcObject = test.stream; hearEl.play().catch(() => {}); hearBtn.textContent = '🔇 Parar de ouvir'; };
   const fillDevices = async () => {
     let list = []; try { list = await navigator.mediaDevices.enumerateDevices(); } catch {}
     const ins = list.filter(d => d.kind === 'audioinput'), outs = list.filter(d => d.kind === 'audiooutput');
@@ -1348,9 +1373,9 @@ function voicePanel() {
   };
   selIn.onchange = () => set('input', selIn.value, true);
   selOut.onchange = () => set('output', selOut.value);
-  const stopTest = () => { cancelAnimationFrame(raf); if (test) test.raw.getTracks().forEach(t => t.stop()); test = null; testBtn.textContent = '🎙️ Testar microfone'; meterFill.style.width = '0%'; };
+  const stopTest = () => { cancelAnimationFrame(raf); if (hearEl) { hearEl.srcObject = null; hearEl = null; hearBtn.textContent = '🎧 Ouvir minha voz'; } if (test) { test.raw.getTracks().forEach(t => t.stop()); if (test.ns) test.ns.destroy(); } test = null; testBtn.textContent = '🎙️ Testar microfone'; meterFill.style.width = '0%'; };
   const startTest = async () => {
-    if (test) test.raw.getTracks().forEach(t => t.stop());
+    if (test) { test.raw.getTracks().forEach(t => t.stop()); if (test.ns) test.ns.destroy(); }
     try { test = await buildMic(); } catch (e) { return toast(micErrorText(e)); }
     if (test.bypass) { const a = ac(); if (a) { const an = a.createAnalyser(); an.fftSize = 1024; try { a.createMediaStreamSource(test.raw).connect(an); } catch {} test.an = an; test.buf = new Float32Array(1024); } }
     await fillDevices(); testBtn.textContent = '⏹️ Parar teste';
@@ -1359,6 +1384,8 @@ function voicePanel() {
     loop();
   };
   testBtn.onclick = () => test ? stopTest() : startTest();
+  const toggleIn = () => { const cb = el('input', { type: 'checkbox', checked: !!c.aiIn }); cb.onchange = () => { c.aiIn = cb.checked; saveVoiceCfg(c); V.cfg = c; refreshIncoming(); };
+    return el('label', { class: 'check' }, cb, el('span', {}, el('b', { text: 'Filtrar ruído de quem fala comigo 🎧' }), el('br'), el('small', { class: 'muted', text: 'Limpa o barulho do lado das outras pessoas antes de chegar em você, mesmo que elas não tenham ligado nada.' }))); };
   const toggle = (k, title, desc, disabled) => { const cb = el('input', { type: 'checkbox', checked: !!c[k] && !disabled, disabled: !!disabled }); cb.onchange = () => set(k, cb.checked, true);
     return el('label', { class: 'check' + (disabled ? ' dim' : '') }, cb, el('span', {}, el('b', { text: title }), el('br'), el('small', { class: 'muted', text: desc }))); };
   const range = (min, max, step, val, fmt, on) => { const r = el('input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(val), class: 'vrange' }); const out = el('span', { class: 'muted', text: fmt(val) }); r.oninput = () => { out.textContent = fmt(+r.value); on(+r.value); }; return el('div', { class: 'vrange-row' }, r, out); };
@@ -1370,15 +1397,17 @@ function voicePanel() {
       el('h3', { class: 'section-title', text: 'Aparelhos' }),
       field('Microfone', selIn),
       canPickOutput() ? field('Saída de som (fone, caixinha…)', selOut) : el('p', { class: 'muted', style: 'margin:0;font-size:13px', text: 'Neste navegador a saída de som é escolhida pelo próprio aparelho (por exemplo, conectando o fone).' }),
-      el('div', { class: 'field' }, el('span', { class: 'label', text: 'Teste' }), meter, el('div', { class: 'upload-row' }, testBtn),
-        el('small', { class: 'muted', text: 'A barra fica rosa quando o seu som passa para a chamada. O tracinho é a sensibilidade.' })),
+      el('div', { class: 'field' }, el('span', { class: 'label', text: 'Teste' }), meter, el('div', { class: 'upload-row' }, testBtn, hearBtn),
+        el('small', { class: 'muted', text: 'A barra fica rosa quando o seu som passa para a chamada. O tracinho é a sensibilidade. Com fone, "Ouvir minha voz" mostra como os outros te ouvem, já com a limpeza.' })),
       el('h3', { class: 'section-title', text: 'Modo de áudio' }),
       el('div', { class: 'theme-grid', role: 'radiogroup', 'aria-label': 'Modo de áudio' },
         modeOpt('voice', '🗣️ Voz', 'Melhor sem fone. Tira eco e ruído, mas no celular o som fica com cara de ligação.'),
         modeOpt('hq', '🎧 Alta qualidade', 'Use com fone. Som estéreo e mais nítido, sem o "modo ligação" do celular.')),
       hq ? el('p', { class: 'vnote', text: 'No modo alta qualidade o cancelamento de eco fica desligado. Sem fone, as pessoas podem ouvir o próprio eco. No iPhone o sistema ainda trata o microfone ligado como chamada, mas o som que você manda fica melhor.' }) : null,
       el('h3', { class: 'section-title', text: 'Processamento de voz' }),
-      toggle('noise', 'Supressão de ruído', 'Diminui ventilador, teclado, barulho da rua.'),
+      toggle('ai', 'Supressão de ruído forte (IA) ✨', 'Limpa o barulho em volta o tempo todo, até enquanto você fala: rua, TV, ventilador, cachorro, teclado.'),
+      toggleIn(),
+      toggle('noise', 'Supressão de ruído do navegador', 'Uma limpeza mais leve, que soma com a de cima.'),
       toggle('echo', 'Cancelamento de eco', hq ? 'Desligado no modo alta qualidade.' : 'Evita que as pessoas se ouçam pelo seu alto-falante.', hq),
       toggle('agc', 'Ganho automático', hq ? 'Desligado no modo alta qualidade.' : 'Ajusta o volume da sua voz sozinho.', hq),
       el('h3', { class: 'section-title', text: 'Sensibilidade do microfone' }),
@@ -1888,7 +1917,7 @@ async function joinRoom(id) {
 function leaveRoom(quiet) {
   for (const key of [...V.calls.keys()]) closeVCall(key);
   if (V.mic) V.mic.getTracks().forEach(t => t.stop());
-  if (V.chain) V.chain.raw.getTracks().forEach(t => t.stop());
+  if (V.chain) { V.chain.raw.getTracks().forEach(t => t.stop()); if (V.chain.ns) V.chain.ns.destroy(); }
   if (V.screen) V.screen.getTracks().forEach(t => t.stop());
   V.chain = null; V.mic = null; V.screen = null; V.room = null; V.screens.clear(); delete meters[st.uid];
   track(); if (!quiet) chime([660, 440]);
@@ -1934,12 +1963,29 @@ function showCall(call) {
     let a = V.audios.get(call._uid); if (!a) { a = el('audio', { autoplay: true }); $('#audios').append(a); V.audios.set(call._uid, a); }
     a.srcObject = call._remote; a.muted = V.deaf; applyOutput(); a.play().catch(() => toast('Toque em qualquer lugar para ouvir a sala.'));
     watch(call._remote, call._uid);
+    filterIncoming(call);
   } else if (call._key.endsWith('screen-in')) { V.screens.set(call._uid, call._remote); if (st.view && st.view.kind === 'room') renderRoom(); }
 }
+async function filterIncoming(call) {
+  if (call._proc) { call._proc.ns.destroy(); try { call._proc.src.disconnect(); } catch {} call._proc.keep.srcObject = null; call._proc = null; }
+  const a = V.audios.get(call._uid); if (!a || !call._remote) return;
+  const c = V.cfg || voiceCfg(), ctx = ac();
+  if (!c.aiIn || !ctx) { a.srcObject = call._remote; return; }
+  const bin = await ensureNs(ctx); if (!bin || V.calls.get(call._key) !== call) { a.srcObject = call._remote; return; }
+  try {
+    const keep = new Audio(); keep.muted = true; keep.srcObject = call._remote; keep.play().catch(() => {}); // o Chrome só libera o som remoto se ele estiver tocando num elemento
+    const src = ctx.createMediaStreamSource(call._remote), ns = rnnoiseNode(ctx, bin), dest = ctx.createMediaStreamDestination();
+    src.connect(ns); ns.connect(dest);
+    call._proc = { keep, src, ns, dest };
+    a.srcObject = dest.stream; a.play().catch(() => {});
+  } catch (e) { console.warn(e); a.srcObject = call._remote; }
+}
+function refreshIncoming() { for (const c of V.calls.values()) if (c._kind === 'voice' && c._ok && c._remote) filterIncoming(c); }
 function callClosed(call) {
   if (V.calls.get(call._key) !== call) return;
   V.calls.delete(call._key); delete V.checks[call.connectionId];
   if (call._out) call._out.getTracks().forEach(t => t.stop());
+  if (call._proc) { call._proc.ns.destroy(); call._proc.keep.srcObject = null; call._proc = null; }
   if (call._kind === 'voice') { const a = V.audios.get(call._uid); if (a) { a.srcObject = null; a.remove(); V.audios.delete(call._uid); } delete meters[call._uid]; }
   if (call._key.endsWith('screen-in')) { V.screens.delete(call._uid); if (st.view && st.view.kind === 'room') renderRoom(); }
 }
