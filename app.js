@@ -573,6 +573,7 @@ function renderVoicePanel() {
       el('button', { class: 'icon-btn' + (V.muted ? ' on' : ''), title: 'Microfone', 'aria-label': 'Microfone', onclick: toggleMute }, icon(V.muted ? 'i-mic-off' : 'i-mic')),
       el('button', { class: 'icon-btn' + (V.deaf ? ' on' : ''), title: 'Som', 'aria-label': 'Som', onclick: toggleDeaf }, icon(V.deaf ? 'i-head-off' : 'i-head')),
       el('button', { class: 'icon-btn' + (V.screen ? ' on' : ''), title: 'Compartilhar tela', 'aria-label': 'Compartilhar tela', onclick: toggleScreen }, icon('i-screen')),
+      V.screen ? el('button', { class: 'icon-btn', title: 'Trocar tela', 'aria-label': 'Trocar tela', onclick: switchScreen }, icon('i-swap')) : null,
       el('button', { class: 'icon-btn', title: 'Configurar voz', 'aria-label': 'Configurar voz', onclick: openVoiceSettings }, icon('i-gear')))));
 }
 function renderMeBar() {
@@ -2022,6 +2023,7 @@ function renderRoom() {
         el('button', { class: 'btn' + (V.muted ? ' on' : ''), onclick: toggleMute }, icon(V.muted ? 'i-mic-off' : 'i-mic'), lbl(V.muted ? 'Microfone mudo' : 'Microfone')),
         el('button', { class: 'btn' + (V.deaf ? ' on' : ''), onclick: toggleDeaf }, icon(V.deaf ? 'i-head-off' : 'i-head'), lbl(V.deaf ? 'Som desligado' : 'Som')),
         el('button', { class: 'btn' + (V.screen ? ' on' : ''), onclick: toggleScreen }, icon('i-screen'), lbl(V.screen ? 'Parar tela' : 'Compartilhar tela')),
+        V.screen ? el('button', { class: 'btn', 'aria-label': 'Trocar tela', onclick: switchScreen }, icon('i-swap'), lbl('Trocar tela')) : null,
         el('button', { class: 'btn', 'aria-label': 'Configurar voz', onclick: openVoiceSettings }, icon('i-gear'), lbl('Áudio')),
         el('button', { class: 'btn danger', 'aria-label': 'Sair da sala', onclick: () => leaveRoom() }, icon('i-hang'), lbl('Sair')))
     : el('div', { class: 'room-bar' }, el('button', { class: 'btn primary', onclick: () => joinRoom(c.id) }, icon('i-speaker'), lbl('Entrar na sala')));
@@ -2065,7 +2067,18 @@ function syncCalls() {
   if (!V.room || !V.peer || !V.peer.open) return;
   const others = Object.entries(st.presence).filter(([uid, p]) => uid !== st.uid && p.room === V.room && p.peer);
   const ids = new Map(others);
-  for (const [key, call] of V.calls) { const uid = key.split(':')[0], p = ids.get(uid); if (!p || p.peer !== call.peer || (key.endsWith('screen-in') && !p.sharing)) closeVCall(key); }
+  const now = Date.now(); V.missing = V.missing || new Map();
+  for (const [key, call] of [...V.calls]) {
+    const uid = key.split(':')[0], p = ids.get(uid);
+    if (p && (p.peer !== call.peer || (key.endsWith('screen-in') && !p.sharing))) { V.missing.delete(key); closeVCall(key); continue; } // trocou de conexão ou parou de transmitir de verdade
+    if (!p) { // sumiu da lista: pode ser só a página dela "cochilando" em segundo plano
+      const since = V.missing.get(key);
+      if (!since) { V.missing.set(key, now); setTimeout(syncCalls, 10500); }
+      else if (now - since >= 10000) { V.missing.delete(key); closeVCall(key); }
+      continue;
+    }
+    V.missing.delete(key);
+  }
   for (const [uid, p] of others) {
     if (V.peerId < p.peer && !V.calls.has(uid + ':voice')) startCall(uid, p.peer, 'voice', V.mic);
     if (V.screen && !V.calls.has(uid + ':screen-out')) startCall(uid, p.peer, 'screen', V.screen);
@@ -2191,6 +2204,40 @@ async function toggleScreen() {
       el('p', { class: 'vnote', text: '🔊 ' + tip }),
       el('button', { class: 'sheet-btn cancel', text: 'Cancelar', onclick: () => ov.remove() })));
   document.body.append(ov);
+}
+async function switchScreen() {
+  if (!V.screen) return;
+  const pr = SHARE_PRESETS[V.screenPreset] || SHARE_PRESETS.game;
+  let next;
+  try {
+    next = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: pr.fps, max: pr.fps }, width: { ideal: pr.w, max: pr.w }, height: { ideal: pr.h, max: pr.h } },
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 }, sampleRate: { ideal: 48000 }, suppressLocalAudioPlayback: false },
+      systemAudio: 'include', windowAudio: 'system', surfaceSwitching: 'include', selfBrowserSurface: 'exclude', monitorTypeSurfaces: 'include'
+    });
+  } catch { return; }
+  const vt = next.getVideoTracks()[0]; try { vt.contentHint = pr.hint; } catch {}
+  const at = next.getAudioTracks()[0]; if (at) { try { at.contentHint = 'music'; } catch {} }
+  const old = V.screen, hadAudio = !!old.getAudioTracks().length;
+  old.getVideoTracks().forEach(t => t.removeEventListener('ended', stopScreen));
+  V.screen = next; vt.addEventListener('ended', stopScreen);
+  for (const [key, call] of [...V.calls]) {
+    if (!key.endsWith('screen-out')) continue;
+    const pc = call.peerConnection;
+    if (!pc || hadAudio !== !!at) { closeVCall(key); continue; } // mudou de "com som" para "sem som": reconecta rapidinho
+    const out = next.clone(); out.getTracks().forEach(t => t.enabled = !!call._ok);
+    for (const sender of pc.getSenders()) {
+      if (!sender.track) continue;
+      const nt = out.getTracks().find(t => t.kind === sender.track.kind);
+      if (nt) await sender.replaceTrack(nt).catch(() => {});
+    }
+    if (call._out) call._out.getTracks().forEach(t => t.stop());
+    call._out = out; tuneScreenSender(call);
+  }
+  old.getTracks().forEach(t => t.stop());
+  if (!at) toast('A tela nova foi sem som. Para o som ir junto, escolha "Tela inteira" e marque "Compartilhar áudio do sistema".');
+  syncCalls(); track(); if (st.view && st.view.kind === 'room') renderRoom();
+  toast('Tela trocada sem cortar a transmissão ✨');
 }
 async function startScreen(kind) {
   const pr = SHARE_PRESETS[kind] || SHARE_PRESETS.game;
