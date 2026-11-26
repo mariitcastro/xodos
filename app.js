@@ -111,6 +111,40 @@ function signedUrl(bucket, path) {
   urlCache.set(k, { p, exp: Date.now() + 50 * 60e3 }); return p;
 }
 
+/* ---------------- personalização do perfil (como no Discord) ---------------- */
+const FONTS = {
+  padrao: { label: 'Padrão', fam: null },
+  fofa: { label: 'Fofinha', g: 'Fredoka:wght@600', fam: '"Fredoka", sans-serif' },
+  script: { label: 'Cursiva', g: 'Pacifico', fam: '"Pacifico", cursive', size: .95 },
+  danca: { label: 'Dancing', g: 'Dancing+Script:wght@700', fam: '"Dancing Script", cursive', size: 1.2 },
+  elegante: { label: 'Elegante', g: 'Playfair+Display:ital,wght@1,700', fam: '"Playfair Display", serif', italic: true },
+  mao: { label: 'À mão', g: 'Caveat:wght@700', fam: '"Caveat", cursive', size: 1.3 },
+  redonda: { label: 'Arredondada', g: 'Comfortaa:wght@700', fam: '"Comfortaa", sans-serif' },
+  retro: { label: 'Retrô', g: 'Lobster', fam: '"Lobster", cursive', size: 1.05 },
+  pixel: { label: 'Pixel', g: 'Press+Start+2P', fam: '"Press Start 2P", monospace', size: .62 },
+  forte: { label: 'Forte', g: 'Bungee', fam: '"Bungee", sans-serif', size: .9 }
+};
+const DECOS = { '': { label: 'Nenhuma', e: '' }, laco: { label: 'Laço', e: '🎀' }, coracoes: { label: 'Corações', e: '💗' }, brilhos: { label: 'Brilhos', e: '✨' }, coroa: { label: 'Coroa', e: '👑' }, flores: { label: 'Flores', e: '🌸' }, estrela: { label: 'Estrela', e: '⭐' } };
+const PALETTES = [['#FF3E96', '#FF83FA'], ['#FFB3D1', '#FFE3F0'], ['#EE6AA7', '#B865F0'], ['#FF9EC4', '#FFD86B'], ['#C084FC', '#7DD3FC'], ['#FF7A9A', '#FFC2A8'], ['#F472B6', '#FDE68A'], ['#6EE7B7', '#F9A8D4']];
+const hex = v => /^#[0-9a-f]{6}$/i.test(v || '') ? v : null;
+function styleOf(p) {
+  const s = (p && p.style && typeof p.style === 'object') ? p.style : {};
+  return { p: hex(s.p), a: hex(s.a), font: FONTS[s.font] ? s.font : 'padrao', eff: ['solid', 'gradient', 'glow'].includes(s.eff) ? s.eff : '', c1: hex(s.c1) || '#FF3E96', c2: hex(s.c2) || '#FF83FA', deco: DECOS[s.deco] ? s.deco : '' };
+}
+const loadedFonts = new Set();
+function loadFont(key) {
+  const f = FONTS[key]; if (!f || !f.g || loadedFonts.has(key)) return; loadedFonts.add(key);
+  document.head.append(el('link', { rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=' + f.g + '&display=swap' }));
+}
+function nameStyle(p, fallback) {
+  const s = styleOf(p), f = FONTS[s.font], out = [];
+  if (f.fam) { loadFont(s.font); out.push(`font-family:${f.fam}`); if (f.size) out.push(`font-size:${f.size}em`); if (f.italic) out.push('font-style:italic'); }
+  if (s.eff === 'gradient') out.push(`background:linear-gradient(90deg,${s.c1},${s.c2});-webkit-background-clip:text;background-clip:text;color:transparent`);
+  else if (s.eff === 'glow') out.push(`color:${s.c1};text-shadow:0 0 6px ${s.c1}aa,0 0 14px ${s.c1}66`);
+  else if (s.eff === 'solid') out.push(`color:${s.c1}`);
+  else if (fallback) out.push(`color:${fallback}`);
+  return out.join(';');
+}
 function avatarEl(p, size = 32, opts = {}) {
   const uid = p ? p.id : '';
   const d = el('div', { class: 'av', style: `--s:${size}px;--c:${colorFor(uid)}` });
@@ -119,6 +153,8 @@ function avatarEl(p, size = 32, opts = {}) {
   const label = el('span', { text: p && p.bot ? '🌸' : ((p && p.display_name) || '?').slice(0, 1).toUpperCase() });
   d.append(label);
   if (opts.dot) d.append(el('span', { class: 'dot' + (st.online.has(uid) ? ' on' : '') }));
+  const deco = p && !p.bot && size >= 22 ? styleOf(p).deco : '';
+  if (deco) { d.classList.add('has-deco'); d.append(el('span', { class: 'deco deco-' + deco, 'aria-hidden': 'true', text: DECOS[deco].e })); }
   if (p && p.bot) label.replaceWith(el('img', { src: 'kaka.svg', alt: 'Kaká' }));
   if (p && p.avatar_path) signedUrl('profiles', p.avatar_path).then(u => { if (u) label.replaceWith(el('img', { src: u, alt: '' })); });
   return d;
@@ -349,7 +385,7 @@ async function logout() {
 }
 function fatal(e) { console.error(e); authScreen(el('h2', { text: 'Algo deu errado' }), el('p', { text: String(e && e.message || e) }), el('button', { class: 'btn primary', text: 'Tentar de novo', onclick: () => location.reload() })); }
 
-const ME_COLS = 'id,username,display_name,status,bio,avatar_path,banner_path,role,approved,current_key_id,created_at,welcomed,must_change_password';
+const ME_COLS = 'id,username,display_name,status,bio,avatar_path,banner_path,role,approved,current_key_id,created_at,welcomed,must_change_password,pronouns,style';
 async function fetchMe() {
   const [{ data: me, error }, { data: keys }] = await Promise.all([sb.from('profiles').select(ME_COLS).eq('id', st.uid).single(), sb.rpc('my_key_material')]);
   return { data: me ? Object.assign(me, keys || {}) : null, error };
@@ -406,7 +442,7 @@ async function boot() {
 
 /* ---------------- dados ---------------- */
 async function loadProfiles() {
-  const { data } = await sb.from('profiles').select('id,username,display_name,status,bio,avatar_path,banner_path,role,approved,current_key_id,created_at');
+  const { data } = await sb.from('profiles').select('id,username,display_name,status,bio,avatar_path,banner_path,role,approved,current_key_id,created_at,pronouns,style');
   st.profiles = new Map((data || []).map(p => [p.id, p]));
   const me = st.profiles.get(st.uid); if (me) Object.assign(st.me, me);
 }
@@ -580,7 +616,7 @@ function renderMeBar() {
   const me = st.profiles.get(st.uid) || st.me;
   $('#meBar').replaceChildren(
     el('div', { class: 'who', role: 'button', tabindex: '0', onclick: () => openProfile(st.uid) }, avatarEl(me, 34, { dot: true, speak: true }),
-      el('div', { class: 't' }, el('b', { text: me.display_name }), el('small', { text: me.status || '@' + me.username }))),
+      el('div', { class: 't' }, el('b', { text: me.display_name, style: nameStyle(me) }), el('small', { text: me.status || '@' + me.username }))),
     el('button', { class: 'icon-btn', title: 'Configurações', 'aria-label': 'Configurações', onclick: () => openSettings() }, icon('i-gear')));
 }
 function renderMembers() {
@@ -589,7 +625,7 @@ function renderMembers() {
   const all = (sv ? serverMembers(sv) : members()).slice().sort((a, b) => a.display_name.localeCompare(b.display_name, 'pt-BR'));
   const on = all.filter(p => st.online.has(p.id)), off = all.filter(p => !st.online.has(p.id));
   const row = p => el('button', { class: 'mem' + (st.online.has(p.id) ? '' : ' off'), onclick: () => openProfile(p.id) }, avatarEl(p, 32, { dot: true }),
-    el('div', { class: 't' }, el('b', { style: sv ? `color:${userColor(p.id, sv.id)}` : null }, p.display_name, owner ? (p.id === owner ? el('span', { class: 'crown', title: 'Dono do servidor', text: ' ♛' }) : null) : p.role === 'admin' ? el('span', { class: 'crown', title: 'Administração', text: ' ♛' }) : null), p.status ? el('small', { text: p.status }) : null));
+    el('div', { class: 't' }, el('b', { style: nameStyle(p, sv ? userColor(p.id, sv.id) : null) }, p.display_name, owner ? (p.id === owner ? el('span', { class: 'crown', title: 'Dono do servidor', text: ' ♛' }) : null) : p.role === 'admin' ? el('span', { class: 'crown', title: 'Administração', text: ' ♛' }) : null), p.status ? el('small', { text: p.status }) : null));
   const bot = el('button', { class: 'mem', onclick: () => openProfile('kaka') }, avatarEl(KAKA, 32), el('div', { class: 't' }, el('b', {}, 'Kaká ', el('span', { class: 'bot-tag', text: 'BOT' })), el('small', { text: KAKA.status })));
   const kids = [el('div', { class: 'cat' }, 'Bots — 1'), bot];
   let rest = on;
@@ -691,7 +727,7 @@ function msgEl(m, prev) {
   if (replyId) row.append(replyRefEl(replyId, false, null));
   if (!dm && uid !== st.uid && repliesToMe(m)) row.classList.add('mentioned');
   if (first) row.append(el('div', { onclick: () => openProfile(uid) }, avatarEl(p, 42)), el('div', { class: 'meta' },
-    el('b', { text: p ? p.display_name : 'Alguém que saiu', style: `color:${dm ? nameColor(uid) : userColor(uid, (serverOf(m.channel_id) || {}).id)}`, onclick: () => openProfile(uid) }),
+    el('b', { text: p ? p.display_name : 'Alguém que saiu', style: nameStyle(p, dm ? nameColor(uid) : userColor(uid, (serverOf(m.channel_id) || {}).id)), onclick: () => openProfile(uid) }),
     el('time', { text: fmtTime(m.created_at), datetime: m.created_at })));
   const body = el('div', { class: 'body' }), media = el('div', { class: 'media' });
   const fill = (text, imgUrlPromise, gif) => {
@@ -1072,9 +1108,11 @@ function modal(title, body, opts = {}) {
 function profileCard(p) {
   const banner = el('div', { class: 'banner' });
   if (p.banner_path) signedUrl('profiles', p.banner_path).then(u => { if (u) banner.append(el('img', { src: u, alt: '' })); });
-  return el('div', { class: 'pcard' }, banner, el('div', { class: 'avwrap' }, avatarEl(p, 88, { dot: true })),
-    el('div', { class: 'info' }, el('b', {}, p.display_name || '—', p.role === 'admin' ? el('span', { class: 'crown', text: ' ♛ admin' }) : null, p.bot ? el('span', { class: 'bot-tag', text: 'BOT' }) : null),
-      el('span', { class: 'user', text: '@' + (p.username || '') }),
+  const sty = styleOf(p), themed = sty.p && sty.a;
+  if (themed && !p.banner_path) banner.style.background = `linear-gradient(135deg, ${sty.p}, ${sty.a})`;
+  return el('div', { class: 'pcard' + (themed ? ' themed' : ''), style: themed ? `--tp:${sty.p};--ta:${sty.a}` : null }, banner, el('div', { class: 'avwrap' }, avatarEl(p, 88, { dot: true })),
+    el('div', { class: 'info' }, el('b', {}, el('span', { class: 'pname', text: p.display_name || '—', style: nameStyle(p) }), p.role === 'admin' ? el('span', { class: 'crown', text: ' ♛ admin' }) : null, p.bot ? el('span', { class: 'bot-tag', text: 'BOT' }) : null),
+      el('span', { class: 'user', text: '@' + (p.username || '') + (p.pronouns ? ' · ' + p.pronouns : '') }),
       p.status ? el('div', { class: 'status', text: p.status }) : null,
       p.bio ? el('div', { class: 'bio', text: p.bio }) : null,
       p.created_at ? el('small', { class: 'muted', text: 'No Xodó\'S desde ' + new Date(p.created_at).toLocaleDateString('pt-BR') }) : null));
@@ -1129,7 +1167,8 @@ function openSettings(tab = 'perfil') {
 }
 function profileEditor() {
   const me = st.profiles.get(st.uid);
-  const draft = { ...me }; const files = { avatar: null, banner: null };
+  const draft = { ...me, style: { ...styleOf(me) } }; const files = { avatar: null, banner: null };
+  const custom = el('div', { class: 'field', style: 'gap:14px' });
   const preview = el('div');
   const refresh = () => {
     const p = { ...draft };
@@ -1137,6 +1176,29 @@ function profileEditor() {
     if (files.avatar) { const av = card.querySelector('.avwrap .av span'); if (av) av.replaceWith(el('img', { src: URL.createObjectURL(files.avatar), alt: '' })); }
     if (files.banner) card.querySelector('.banner').append(el('img', { src: URL.createObjectURL(files.banner), alt: '' }));
     preview.replaceChildren(card);
+    drawCustom();
+  };
+  const setS = (k, v) => { draft.style[k] = v; refresh(); };
+  const colorIn = (k, label) => { const i = el('input', { type: 'color', value: draft.style[k] || '#FF3E96', 'aria-label': label, title: label }); i.oninput = () => setS(k, i.value); return i; };
+  const drawCustom = () => {
+    const st_ = draft.style, nm = draft.display_name || 'Seu nome';
+    const fake = { ...me, ...draft, avatar_path: files.avatar ? null : draft.avatar_path, style: { ...draft.style } };
+    custom.replaceChildren(
+      el('div', { class: 'mini-prev' }, avatarEl(fake, 38), el('div', { class: 't' }, el('div', {}, el('b', { text: nm, style: nameStyle(fake, colorFor(st.uid)) }), el('time', { text: ' Hoje' })), el('span', { text: 'É assim que eu apareço no chat 💖' }))),
+      el('h3', { class: 'section-title', text: '🎨 Cores do perfil' }),
+      el('div', { class: 'swatches' }, ...PALETTES.map(([a, b]) => el('button', { type: 'button', class: 'pal' + (st_.p === a && st_.a === b ? ' on' : ''), style: `background:linear-gradient(135deg,${a},${b})`, 'aria-label': 'Paleta', onclick: () => { draft.style.p = a; draft.style.a = b; refresh(); } })),
+        el('label', { class: 'pal-custom' }, 'Livre:', colorIn('p', 'Cor principal'), colorIn('a', 'Cor de destaque')),
+        el('button', { type: 'button', class: 'btn small ghost', text: 'Sem cores', onclick: () => { draft.style.p = null; draft.style.a = null; refresh(); } })),
+      el('h3', { class: 'section-title', text: '✍️ Fonte do nome' }),
+      el('div', { class: 'font-grid' }, ...Object.entries(FONTS).map(([k, f]) => { if (f.g) loadFont(k);
+        return el('button', { type: 'button', class: 'font-opt' + (st_.font === k ? ' on' : ''), onclick: () => setS('font', k) },
+          el('span', { class: 'fo-name', text: nm, style: f.fam ? `font-family:${f.fam};${f.size ? 'font-size:' + f.size + 'em;' : ''}${f.italic ? 'font-style:italic' : ''}` : '' }), el('small', { text: f.label })); })),
+      el('h3', { class: 'section-title', text: '🌈 Efeito do nome' }),
+      el('div', { class: 'tabs' }, ...[['', 'Normal'], ['solid', 'Cor'], ['gradient', 'Degradê'], ['glow', 'Brilho neon']].map(([k, l]) => el('button', { type: 'button', class: st_.eff === k ? 'active' : '', text: l, onclick: () => setS('eff', k) }))),
+      st_.eff ? el('div', { class: 'swatches' }, el('label', { class: 'pal-custom' }, st_.eff === 'gradient' ? 'Cores:' : 'Cor:', colorIn('c1', 'Cor 1'), st_.eff === 'gradient' ? colorIn('c2', 'Cor 2') : null),
+        ...PALETTES.slice(0, 6).map(([a, b]) => el('button', { type: 'button', class: 'pal small', style: `background:${st_.eff === 'gradient' ? `linear-gradient(90deg,${a},${b})` : a}`, 'aria-label': 'Cores do nome', onclick: () => { draft.style.c1 = a; draft.style.c2 = b; refresh(); } }))) : null,
+      el('h3', { class: 'section-title', text: '🎀 Decoração da foto' }),
+      el('div', { class: 'deco-grid' }, ...Object.entries(DECOS).map(([k, d]) => el('button', { type: 'button', class: 'deco-opt' + (st_.deco === k ? ' on' : ''), onclick: () => setS('deco', k) }, el('span', { class: 'deco-e', text: d.e || '∅' }), el('small', { text: d.label })))));
   };
   const inp = (key, max, ta) => { const i = el(ta ? 'textarea' : 'input', { class: 'input', value: draft[key] || '', maxlength: String(max), rows: ta ? '3' : null }); i.oninput = () => { draft[key] = i.value; refresh(); }; return i; };
   const pick = kind => { const f = el('input', { type: 'file', accept: IMG_TYPES.join(',') }); f.onchange = () => { const x = f.files[0]; if (x && checkImage(x, 8)) { files[kind] = x; refresh(); } }; f.click(); };
@@ -1149,7 +1211,8 @@ function profileEditor() {
     if (!String(draft.display_name || '').trim()) return err.textContent = 'Escreva um nome de exibição.';
     busy(save, true, 'Salvando…');
     try {
-      const upd = { display_name: draft.display_name.trim(), username: u, status: (draft.status || '').trim(), bio: (draft.bio || '').trim() }, old = [];
+      const sty = styleOf({ style: draft.style }), cleanStyle = { font: sty.font, eff: sty.eff, c1: sty.c1, c2: sty.c2, deco: sty.deco }; if (draft.style.p && draft.style.a) { cleanStyle.p = sty.p; cleanStyle.a = sty.a; }
+      const upd = { display_name: draft.display_name.trim(), username: u, status: (draft.status || '').trim(), bio: (draft.bio || '').trim(), pronouns: (draft.pronouns || '').trim().slice(0, 40), style: cleanStyle }, old = [];
       for (const kind of ['avatar', 'banner']) {
         const col = kind + '_path';
         if (files[kind]) { const path = `${st.uid}/${kind}-${uuid()}.${extOf(files[kind])}`; const { error } = await sb.storage.from('profiles').upload(path, files[kind], { contentType: files[kind].type }); if (error) throw error; upd[col] = path; if (me[col]) old.push(me[col]); }
@@ -1172,7 +1235,7 @@ function profileEditor() {
       el('button', { class: 'btn small ghost', text: 'Tirar banner', onclick: () => { files.banner = null; draft.banner_path = null; refresh(); } })),
     el('p', { class: 'muted', style: 'margin:0;font-size:13px', text: 'Foto e banner aceitam GIF animado (até 8 MB).' }),
     field('Nome de exibição', inp('display_name', 32)), field('Nome de usuário', inp('username', 24)),
-    field('Status', inp('status', 80)), field('Sobre mim', inp('bio', 300, true)), err, save);
+    field('Pronomes', inp('pronouns', 40)), field('Status', inp('status', 80)), field('Sobre mim', inp('bio', 300, true)), custom, err, save);
 }
 function accountPanel() {
   const cur = el('input', { class: 'input', type: 'password', autocomplete: 'current-password' });
@@ -1969,7 +2032,7 @@ function subscribeDb() {
       if (n.id === st.uid && !n.approved) return location.reload();
       const cur = st.profiles.get(n.id) || {};
       ['avatar_path', 'banner_path'].forEach(k => { if (cur[k] !== n[k]) urlCache.delete('profiles/' + cur[k]); });
-      st.profiles.set(n.id, Object.assign(cur, { id: n.id, username: n.username, display_name: n.display_name, status: n.status, bio: n.bio, avatar_path: n.avatar_path, banner_path: n.banner_path, role: n.role, approved: n.approved, current_key_id: n.current_key_id, created_at: n.created_at }));
+      st.profiles.set(n.id, Object.assign(cur, { id: n.id, username: n.username, display_name: n.display_name, status: n.status, bio: n.bio, avatar_path: n.avatar_path, banner_path: n.banner_path, role: n.role, approved: n.approved, current_key_id: n.current_key_id, created_at: n.created_at, pronouns: n.pronouns, style: n.style }));
       if (n.id === st.uid) Object.assign(st.me, st.profiles.get(n.id));
       renderAll();
     })
@@ -2022,7 +2085,7 @@ function renderRoom() {
   const tiles = el('div', { class: 'tiles' }, people.map(([uid, p]) => {
     const other = here && uid !== st.uid;
     return el(other ? 'button' : 'div', { class: 'tile' + (other ? ' clickable' : ''), 'data-speak-tile': uid, title: other ? 'Mudar o volume de ' + nameOf(uid) : null, onclick: other ? () => volumeSheet(uid, 'user') : null },
-      avatarEl(st.profiles.get(uid), 64, { speak: true }), el('b', { text: nameOf(uid) }),
+      avatarEl(st.profiles.get(uid), 64, { speak: true }), el('b', { text: nameOf(uid), style: nameStyle(st.profiles.get(uid)) }),
       el('div', { class: 'flags' }, p.sharing ? el('span', { class: 'live', text: 'AO VIVO' }) : null, p.deaf ? icon('i-head-off') : p.muted ? icon('i-mic-off') : null, other ? volBadge('user', uid) : null),
       other ? el('small', { class: 'tile-hint', text: 'Toque para o volume' }) : null);
   }));
