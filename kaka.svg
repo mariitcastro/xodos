@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FF3E96"/><stop offset=".55" stop-color="#EE6AA7"/><stop offset="1" stop-color="#FF83FA"/></linearGradient>
+    <linearGradient id="hair" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7cc8ff"/><stop offset="1" stop-color="#3f7fe0"/></linearGradient>
+    <clipPath id="c"><circle cx="64" cy="64" r="64"/></clipPath>
+  </defs>
+  <g clip-path="url(#c)">
+    <rect width="128" height="128" fill="url(#bg)"/>
+    <!-- cabelo de trás -->
+    <path d="M22 66c0-30 18-48 42-48s42 18 42 48v44c0 6-6 8-10 4l-4-30H36l-4 30c-4 4-10 2-10-4z" fill="url(#hair)"/>
+    <!-- corpo / blusinha -->
+    <path d="M30 128c2-18 16-28 34-28s32 10 34 28z" fill="#fff4fa"/>
+    <path d="M52 101l12 10 12-10" fill="none" stroke="#FF3E96" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- pescoço -->
+    <rect x="56" y="88" width="16" height="14" rx="6" fill="#ffd9c7"/>
+    <!-- rosto -->
+    <ellipse cx="64" cy="66" rx="31" ry="29" fill="#ffe3d4"/>
+    <!-- franja -->
+    <path d="M32 60c2-22 16-34 32-34s30 12 32 34c-6-3-11-9-13-16-4 7-12 11-21 12 3-3 4-7 4-10-6 6-14 10-24 11 2-2 3-5 3-8-4 5-8 9-13 11z" fill="url(#hair)"/>
+    <!-- brilho no cabelo -->
+    <path d="M44 34c6-5 13-7 20-7" fill="none" stroke="#d6eeff" stroke-width="3" stroke-linecap="round" opacity=".8"/>
+    <!-- olhos -->
+    <ellipse cx="51" cy="70" rx="5.2" ry="6.4" fill="#2a1b3d"/>
+    <ellipse cx="77" cy="70" rx="5.2" ry="6.4" fill="#2a1b3d"/>
+    <circle cx="53" cy="67.5" r="2" fill="#fff"/>
+    <circle cx="79" cy="67.5" r="2" fill="#fff"/>
+    <circle cx="49.5" cy="72.5" r="1" fill="#fff"/>
+    <circle cx="75.5" cy="72.5" r="1" fill="#fff"/>
+    <!-- bochechas -->
+    <ellipse cx="44" cy="80" rx="5.5" ry="3.4" fill="#ff7fb0" opacity=".55"/>
+    <ellipse cx="84" cy="80" rx="5.5" ry="3.4" fill="#ff7fb0" opacity=".55"/>
+    <!-- sorriso -->
+    <path d="M59 80q5 5 10 0" fill="none" stroke="#c2366f" stroke-width="2.4" stroke-linecap="round"/>
+    <!-- lacinho -->
+    <g transform="translate(90 34) rotate(18)">
+      <path d="M0 0l-14-8c-3-1-5 1-5 4v8c0 3 2 5 5 4z" fill="#FF3E96"/>
+      <path d="M0 0l14-8c3-1 5 1 5 4v8c0 3-2 5-5 4z" fill="#FF3E96"/>
+      <circle r="4.5" fill="#FF83FA"/>
+    </g>
+  </g>
+</svg>
