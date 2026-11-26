@@ -1225,7 +1225,8 @@ function accountPanel() {
 
 
 /* ---------------- voz e áudio: configurações ---------------- */
-const VOICE_DEFAULT = { autoPip: true, input: '', output: '', mode: 'voice', ai: true, aiIn: true, noise: true, echo: true, agc: true, gateAuto: true, gate: -55, inVol: 1, outVol: 1 };
+const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const VOICE_DEFAULT = { bgSafe: IS_IOS, autoPip: true, input: '', output: '', mode: 'voice', ai: true, aiIn: true, noise: true, echo: true, agc: true, gateAuto: true, gate: -55, inVol: 1, outVol: 1 };
 function voiceCfg() { try { return Object.assign({}, VOICE_DEFAULT, JSON.parse(localStorage.getItem('xodos-voice') || '{}')); } catch { return { ...VOICE_DEFAULT }; } }
 function saveVoiceCfg(c) { try { localStorage.setItem('xodos-voice', JSON.stringify(c)); } catch {} }
 const canPickOutput = () => 'setSinkId' in HTMLMediaElement.prototype;
@@ -1266,6 +1267,7 @@ const rawChain = raw => ({ raw, stream: raw, gain: null, gate: null, an: null, o
 async function buildMic() {
   const c = voiceCfg();
   const raw = await getMicRaw(c);
+  if (c.bgSafe) return rawChain(raw); // modo segundo plano: nada passa pelo processador do celular
   const a = ac();
   if (!a) return rawChain(raw);
   // no celular o "processador de áudio" pode estar dormindo: tenta acordar; se não der, manda a voz direto
@@ -1334,6 +1336,7 @@ function applyOutput() {
 }
 function setupScreenAudio(call) {
   cleanupScreenAudio(call._uid);
+  if ((V.cfg || voiceCfg()).bgSafe) { applyOutput(); return; } // o próprio vídeo toca o som
   const ctx = ac(), s = call._remote;
   if (!ctx || ctx.state !== 'running' || !s.getAudioTracks().length) return;
   try {
@@ -1430,6 +1433,12 @@ function voicePanel() {
     loop();
   };
   testBtn.onclick = () => test ? stopTest() : startTest();
+  const toggleBg = () => { const cb = el('input', { type: 'checkbox', checked: !!c.bgSafe });
+    cb.onchange = () => { c.bgSafe = cb.checked; saveVoiceCfg(c); V.cfg = c;
+      if (V.room) { swapMic(); refreshIncoming(); for (const call of V.calls.values()) if (call._key && call._key.endsWith('screen-in') && call._remote) setupScreenAudio(call); if (st.view && st.view.kind === 'room') renderRoom(); }
+      if (test) startTest(); draw(); };
+    return el('label', { class: 'check' }, cb, el('span', {}, el('b', { text: 'Modo segundo plano 📱' }), el('br'),
+      el('small', { class: 'muted', text: 'Deixa a call funcionando quando você sai do app. Desliga a IA de ruído e o volume acima de 100%, porque o celular corta esses recursos fora do app.' }))); };
   const toggleIn = () => { const cb = el('input', { type: 'checkbox', checked: !!c.aiIn }); cb.onchange = () => { c.aiIn = cb.checked; saveVoiceCfg(c); V.cfg = c; refreshIncoming(); };
     return el('label', { class: 'check' }, cb, el('span', {}, el('b', { text: 'Filtrar ruído de quem fala comigo 🎧' }), el('br'), el('small', { class: 'muted', text: 'Limpa o barulho do lado das outras pessoas antes de chegar em você, mesmo que elas não tenham ligado nada.' }))); };
   const toggle = (k, title, desc, disabled) => { const cb = el('input', { type: 'checkbox', checked: !!c[k] && !disabled, disabled: !!disabled }); cb.onchange = () => set(k, cb.checked, true);
@@ -1450,9 +1459,12 @@ function voicePanel() {
         modeOpt('voice', '🗣️ Voz', 'Melhor sem fone. Tira eco e ruído, mas no celular o som fica com cara de ligação.'),
         modeOpt('hq', '🎧 Alta qualidade', 'Use com fone. Som estéreo e mais nítido, sem o "modo ligação" do celular.')),
       hq ? el('p', { class: 'vnote', text: 'No modo alta qualidade o cancelamento de eco fica desligado. Sem fone, as pessoas podem ouvir o próprio eco. No iPhone o sistema ainda trata o microfone ligado como chamada, mas o som que você manda fica melhor.' }) : null,
+      el('h3', { class: 'section-title', text: 'Celular' }),
+      toggleBg(),
       el('h3', { class: 'section-title', text: 'Processamento de voz' }),
-      toggle('ai', 'Supressão de ruído forte (IA) ✨', 'Limpa o barulho em volta o tempo todo, até enquanto você fala: rua, TV, ventilador, cachorro, teclado.'),
-      toggleIn(),
+      c.bgSafe ? el('p', { class: 'vnote', text: 'O Modo segundo plano está ligado, então a IA de ruído e o volume acima de 100% ficam desligados. Para usar a IA, desligue o modo (a call pode ficar muda quando você sair do app).' }) : null,
+      toggle('ai', 'Supressão de ruído forte (IA) ✨', 'Limpa o barulho em volta o tempo todo, até enquanto você fala: rua, TV, ventilador, cachorro, teclado.', c.bgSafe),
+      c.bgSafe ? null : toggleIn(),
       toggle('noise', 'Supressão de ruído do navegador', 'Uma limpeza mais leve, que soma com a de cima.'),
       toggle('echo', 'Cancelamento de eco', hq ? 'Desligado no modo alta qualidade.' : 'Evita que as pessoas se ouçam pelo seu alto-falante.', hq),
       toggle('agc', 'Ganho automático', hq ? 'Desligado no modo alta qualidade.' : 'Ajusta o volume da sua voz sozinho.', hq),
@@ -2095,7 +2107,9 @@ function showCall(call) {
 async function filterIncoming(call) {
   if (call._proc) { if (call._proc.ns) call._proc.ns.destroy(); try { call._proc.src.disconnect(); } catch {} call._proc.keep.srcObject = null; call._proc = null; }
   const a = V.audios.get(call._uid); if (!a || !call._remote) return;
-  const c = V.cfg || voiceCfg(), ctx = ac();
+  const c = V.cfg || voiceCfg();
+  if (c.bgSafe) { a.srcObject = call._remote; a.play().catch(() => {}); applyOutput(); return; }
+  const ctx = ac();
   if (!ctx || ctx.state !== 'running') { a.srcObject = call._remote; applyOutput(); return; }
   const bin = c.aiIn ? await ensureNs(ctx) : null;
   if (V.calls.get(call._key) !== call) return;
