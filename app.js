@@ -2028,7 +2028,7 @@ function renderRoom() {
   main.replaceChildren(topBar(el('h1', {}, icon('i-speaker'), c.name), el('div', { class: 'topic', text: here ? 'Use fone de ouvido para não fazer eco.' : people.length ? people.length + ' na sala' : 'A sala está vazia' })),
     el('div', { class: 'room' }, screens.childElementCount ? screens : null,
       people.length ? tiles : el('div', { class: 'empty' }, el('b', { text: 'Sala vazia' }), 'Entre e chame o pessoal.'),
-      here ? el('p', { class: 'muted', style: 'text-align:center;font-size:13px;margin:0', text: 'Para mandar o som de um vídeo, compartilhe uma aba do Chrome e marque "Compartilhar áudio".' }) : null),
+      here ? el('p', { class: 'muted', style: 'text-align:center;font-size:13px;margin:0', text: 'Som do jogo: no computador, compartilhe a "Tela inteira" e marque "Compartilhar áudio do sistema" (Chrome ou Edge no Windows).' }) : null),
     bar);
 }
 async function joinRoom(id) {
@@ -2073,13 +2073,13 @@ function syncCalls() {
 }
 function startCall(uid, peerId, kind, stream) {
   const out = stream.clone(); out.getTracks().forEach(t => t.enabled = false);
-  const call = V.peer.call(peerId, out, { metadata: { kind, uid: st.uid }, sdpTransform: kind === 'voice' ? opusSdp : undefined }); if (!call) return;
+  const call = V.peer.call(peerId, out, { metadata: { kind, uid: st.uid }, sdpTransform: kind === 'voice' ? opusSdp : screenSdp }); if (!call) return;
   const key = uid + (kind === 'voice' ? ':voice' : ':screen-out');
   Object.assign(call, { _out: out, _uid: uid, _kind: kind, _key: key });
   V.calls.set(key, call);
   if (kind === 'voice') call.on('stream', s => { call._remote = s; showCall(call); });
   call.on('close', () => callClosed(call)); call.on('error', () => callClosed(call));
-  guard(call, uid, () => { call._ok = true; enableOut(call); showCall(call); });
+  guard(call, uid, () => { call._ok = true; enableOut(call); showCall(call); if (kind === 'screen') tuneScreenSender(call); });
 }
 function onIncomingCall(call) {
   const meta = call.metadata || {}, uid = meta.uid, p = st.presence[uid];
@@ -2088,7 +2088,7 @@ function onIncomingCall(call) {
   if (V.calls.has(key)) closeVCall(key);
   Object.assign(call, { _uid: uid, _kind: meta.kind, _key: key });
   if (meta.kind === 'voice') { const out = V.mic.clone(); out.getTracks().forEach(t => t.enabled = false); call._out = out; call.answer(out, { sdpTransform: opusSdp }); }
-  else call.answer();
+  else call.answer(undefined, { sdpTransform: screenSdp });
   V.calls.set(key, call);
   call.on('stream', s => { call._remote = s; showCall(call); });
   call.on('close', () => callClosed(call)); call.on('error', () => callClosed(call));
@@ -2170,14 +2170,78 @@ function applyMic() {
   for (const c of V.calls.values()) if (c._kind === 'voice' && c._ok && c._out) c._out.getAudioTracks().forEach(t => t.enabled = !V.muted);
 }
 function applyDeaf() { for (const a of V.audios.values()) a.muted = V.deaf; for (const sa of V.screenAudio.values()) sa.el.muted = V.deaf; document.querySelectorAll('video[data-uid]').forEach(v => { v.muted = V.deaf || V.screenAudio.has(v.dataset.uid); }); }
+/* transmissão no estilo "Go Live": escolhe o tipo e ajusta qualidade, fluidez e som */
+const SHARE_PRESETS = {
+  game: { label: '🎮 Jogo', desc: 'Fluido, 60 quadros por segundo. Ideal para jogos e coisas que mexem rápido.', fps: 60, w: 1280, h: 720, hint: 'motion', bitrate: 4500000, keep: 'maintain-framerate' },
+  movie: { label: '🎬 Filme ou vídeo', desc: 'Mais nítido, 30 quadros por segundo. Para filmes, séries e vídeos.', fps: 30, w: 1920, h: 1080, hint: 'motion', bitrate: 5000000, keep: 'balanced' },
+  text: { label: '📄 Tela parada', desc: 'Máxima nitidez para ler texto, sites e documentos.', fps: 15, w: 1920, h: 1080, hint: 'detail', bitrate: 2500000, keep: 'maintain-resolution' }
+};
 async function toggleScreen() {
   if (!V.room) return;
   if (V.screen) return stopScreen();
-  try { V.screen = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } }); }
-  catch { return; }
-  if (!V.screen.getAudioTracks().length) toast('Sem som: para o áudio ir junto, compartilhe uma aba do Chrome e marque "Compartilhar áudio".');
-  V.screen.getVideoTracks()[0].addEventListener('ended', stopScreen);
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) return toast('Este aparelho não deixa compartilhar a tela pelo navegador. Use o computador (Chrome ou Edge).');
+  const isWin = /Windows/.test(navigator.userAgent), isMac = /Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints < 2;
+  const tip = isWin ? 'Para o SOM do jogo: na próxima tela escolha "Tela inteira" e marque "Compartilhar áudio do sistema". Compartilhando só a janela do jogo, o som não vai.'
+    : isMac ? 'No Mac, o navegador só manda som de uma aba do Chrome (marque "Compartilhar áudio da aba"). O som de jogos e apps não vai.'
+    : 'Para o som ir junto: escolha "Tela inteira" e marque "Compartilhar áudio do sistema", ou compartilhe uma aba e marque "Compartilhar áudio da aba".';
+  const ov = el('div', { class: 'overlay sheet-ov', onclick: e => { if (e.target === ov) ov.remove(); } },
+    el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Compartilhar tela' },
+      el('div', { class: 'preview', text: 'O que você vai transmitir?' }),
+      ...Object.entries(SHARE_PRESETS).map(([k, pr]) => el('button', { class: 'sheet-btn share-opt', onclick: () => { ov.remove(); startScreen(k); } }, el('span', {}, el('b', { text: pr.label }), el('br'), el('small', { class: 'muted', text: pr.desc })))),
+      el('p', { class: 'vnote', text: '🔊 ' + tip }),
+      el('button', { class: 'sheet-btn cancel', text: 'Cancelar', onclick: () => ov.remove() })));
+  document.body.append(ov);
+}
+async function startScreen(kind) {
+  const pr = SHARE_PRESETS[kind] || SHARE_PRESETS.game;
+  try {
+    V.screen = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: pr.fps, max: pr.fps }, width: { ideal: pr.w, max: pr.w }, height: { ideal: pr.h, max: pr.h } },
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 }, sampleRate: { ideal: 48000 }, suppressLocalAudioPlayback: false },
+      systemAudio: 'include', windowAudio: 'system', surfaceSwitching: 'include', selfBrowserSurface: 'exclude', monitorTypeSurfaces: 'include'
+    });
+  } catch { return; }
+  V.screenPreset = kind;
+  const vt = V.screen.getVideoTracks()[0];
+  try { vt.contentHint = pr.hint; } catch {}
+  const at = V.screen.getAudioTracks()[0]; if (at) { try { at.contentHint = 'music'; } catch {} }
+  if (!at) toast('A transmissão foi sem som. Para o som ir junto, compartilhe a "Tela inteira" e marque "Compartilhar áudio do sistema".');
+  vt.addEventListener('ended', stopScreen);
   track(); syncCalls(); renderVoicePanel(); if (st.view && st.view.kind === 'room') renderRoom();
+}
+// vídeo: prefere H.264 (codificado pela placa de vídeo, mais leve para quem joga e para o iPhone de quem assiste)
+function preferH264(sdp) {
+  const lines = sdp.split(/\r\n/), mi = lines.findIndex(l => l.startsWith('m=video')); if (mi < 0) return sdp;
+  const parts = lines[mi].split(' '), pts = parts.slice(3);
+  const h264 = pts.filter(pt => lines.some(l => new RegExp('^a=rtpmap:' + pt + ' H264/90000', 'i').test(l)));
+  if (!h264.length) return sdp;
+  const rtx = pts.filter(pt => lines.some(l => h264.some(h => l === 'a=fmtp:' + pt + ' apt=' + h)));
+  const first = [...h264, ...rtx], rest = pts.filter(pt => !first.includes(pt));
+  lines[mi] = parts.slice(0, 3).concat(first, rest).join(' ');
+  return lines.join('\r\n');
+}
+function opusMusic(sdp) {
+  const m = sdp.match(/a=rtpmap:(\d+) opus\/48000/i); if (!m) return sdp;
+  const pt = m[1], extra = 'maxaveragebitrate=192000;stereo=1;sprop-stereo=1;useinbandfec=1;usedtx=0';
+  const re = new RegExp('a=fmtp:' + pt + ' ([^\\r\\n]*)');
+  return re.test(sdp) ? sdp.replace(re, (all, params) => 'a=fmtp:' + pt + ' ' + params.split(';').filter(x => !/^(maxaveragebitrate|stereo|sprop-stereo|useinbandfec|usedtx)=/.test(x.trim())).concat(extra).join(';'))
+    : sdp.replace(m[0], m[0] + '\r\na=fmtp:' + pt + ' ' + extra);
+}
+const screenSdp = sdp => preferH264(opusMusic(sdp));
+async function tuneScreenSender(call) {
+  const pc = call.peerConnection; if (!pc) return;
+  const pr = SHARE_PRESETS[V.screenPreset] || SHARE_PRESETS.game;
+  const viewers = [...V.calls.keys()].filter(k => k.endsWith('screen-out')).length || 1;
+  for (const sender of pc.getSenders()) {
+    if (!sender.track || sender.track.kind !== 'video') continue;
+    try {
+      const p = sender.getParameters(); if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+      p.encodings[0].maxBitrate = Math.max(1500000, Math.round(pr.bitrate / Math.max(1, viewers * .75)));
+      p.encodings[0].maxFramerate = pr.fps;
+      p.degradationPreference = pr.keep;
+      await sender.setParameters(p);
+    } catch (e) { console.warn('ajuste da transmissão', e); }
+  }
 }
 function stopScreen() {
   if (!V.screen) return;
