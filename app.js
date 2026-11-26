@@ -1207,6 +1207,7 @@ function accountPanel() {
   };
   return el('div', { class: 'field', style: 'gap:14px' },
     el('p', { class: 'muted', style: 'margin:0' }, 'Conectado como ', el('b', { text: st.email })),
+    el('p', { class: 'muted', style: 'margin:0;font-size:12px' }, 'Versão do Xodó\'S: ', el('b', { text: (document.querySelector('script[src^="app.js"]') || { getAttribute: () => '' }).getAttribute('src').split('v=')[1] || 'local' })),
     el('h3', { class: 'section-title', text: 'Senha' }),
     field('Senha atual', cur), field('Senha nova', n1), field('Repita a senha nova', n2), err,
     el('div', { class: 'upload-row' }, chg, rc), out,
