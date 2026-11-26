@@ -516,3 +516,19 @@ button.role-chip:hover { border-color: var(--rc); }
 .check.dim { opacity: .5; }
 
 .msg.has-reply > .reply-ref + div:not(.meta):not(.body):not(.media) { grid-row: 2 / span 3; }
+
+/* volume por pessoa / transmissão */
+.tile.clickable { cursor: pointer; font: inherit; color: inherit; }
+.tile.clickable:hover { background: var(--raised); }
+.tile-hint { color: var(--muted); font-size: 11px; }
+.vol-badge { font-size: 11px; font-weight: 800; color: var(--lilac); }
+.flags .vol-badge { color: var(--lilac); }
+button.vu { width: 100%; text-align: left; font: inherit; }
+button.vu:hover { background: var(--panel); color: var(--fg); }
+.screen-vol { position: absolute; left: 10px; top: 10px; display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,.6); color: #fff; border-radius: 8px; padding: 6px 10px; font-size: 12px; font-weight: 700; }
+.screen-vol svg { width: 16px; height: 16px; }
+.screen-vol:hover { background: rgba(0,0,0,.8); }
+.vol-sheet { gap: 14px; }
+.vol-head { display: flex; align-items: center; gap: 12px; }
+.vol-head > div:not(.av) { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.vol-pct { font-size: 18px; font-weight: 800; color: var(--hot); white-space: nowrap; }

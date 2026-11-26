@@ -19,7 +19,7 @@ const st = {
   view: null, mode: 'server', msgs: new Map(), plain: new Map(), unread: new Set(),
   presence: {}, online: new Set(), lobby: null, adminUnlocked: false, db: null
 };
-const V = { room: null, peer: null, peerId: null, mic: null, screen: null, muted: false, deaf: false,
+const V = { screenAudio: new Map(), room: null, peer: null, peerId: null, mic: null, screen: null, muted: false, deaf: false,
   calls: new Map(), screens: new Map(), checks: {}, speaking: {}, audios: new Map() };
 const $ = sel => document.querySelector(sel);
 const KAKA = { id: 'kaka', bot: true, approved: true, role: 'bot', username: 'kaka', display_name: 'Kaká',
@@ -554,10 +554,10 @@ function renderSide() {
   for (const c of voice) {
     kids.push(el('button', { class: 'chan' + (vkey(st.view) === 'r:' + c.id ? ' active' : ''), onclick: () => openRoom(c.id) }, icon('i-speaker'), el('span', { class: 'n', text: c.name })));
     const inRoom = Object.entries(st.presence).filter(([, p]) => p.room === c.id);
-    if (inRoom.length) kids.push(el('div', { class: 'vu-list' }, inRoom.map(([uid, p]) => el('div', { class: 'vu' },
+    if (inRoom.length) kids.push(el('div', { class: 'vu-list' }, inRoom.map(([uid, p]) => el(V.room === c.id && uid !== st.uid ? 'button' : 'div', { class: 'vu', onclick: V.room === c.id && uid !== st.uid ? () => volumeSheet(uid, 'user') : null, title: V.room === c.id && uid !== st.uid ? 'Volume de ' + nameOf(uid) : null },
       avatarEl(st.profiles.get(uid), 22, { speak: true }), el('span', { class: 'n', text: nameOf(uid) }),
       p.sharing ? el('span', { class: 'live', text: 'AO VIVO' }) : null,
-      el('span', { class: 'flags' }, p.deaf ? icon('i-head-off') : p.muted ? icon('i-mic-off') : null)))));
+      el('span', { class: 'flags' }, V.room === c.id && uid !== st.uid ? volBadge('user', uid) : null, p.deaf ? icon('i-head-off') : p.muted ? icon('i-mic-off') : null)))));
   }
   if (!chans.length) kids.push(el('p', { class: 'muted', style: 'padding:8px;font-size:13px', text: 'Nenhum canal ainda.' }));
   list.replaceChildren(...kids);
@@ -1315,11 +1315,57 @@ function opusSdp(sdp) {
   return re.test(sdp) ? sdp.replace(re, (all, params) => 'a=fmtp:' + pt + ' ' + params.split(';').filter(x => !/^(maxaveragebitrate|stereo|sprop-stereo|useinbandfec|usedtx)=/.test(x.trim())).concat(extra).join(';'))
     : sdp.replace(m[0], m[0] + '\r\na=fmtp:' + pt + ' ' + extra);
 }
+/* volume de cada pessoa e de cada transmissão (só para mim) */
+const UV_KEY = 'xodos-uservol', SV_KEY = 'xodos-streamvol';
+function volMap(k) { try { return JSON.parse(localStorage.getItem(k) || '{}'); } catch { return {}; } }
+function volOf(kind, uid) { const m = volMap(kind === 'stream' ? SV_KEY : UV_KEY)[uid]; return { v: m && typeof m.v === 'number' ? m.v : 1, mute: !!(m && m.mute) }; }
+function setVol(kind, uid, val) { const k = kind === 'stream' ? SV_KEY : UV_KEY, m = volMap(k); m[uid] = val; if (val.v === 1 && !val.mute) delete m[uid]; try { localStorage.setItem(k, JSON.stringify(m)); } catch {} applyOutput(); }
+function effVol(kind, uid) { const c = V.cfg || voiceCfg(), u = volOf(kind, uid); return u.mute ? 0 : u.v * c.outVol; }
 function applyOutput() {
-  const c = V.cfg || voiceCfg();
-  const els = [...V.audios.values(), ...document.querySelectorAll('.screen video')];
-  for (const a of els) { a.volume = Math.min(1, c.outVol); if (c.output && canPickOutput()) a.setSinkId(c.output).catch(() => {}); }
+  const c = V.cfg || voiceCfg(), sink = el => { if (c.output && canPickOutput()) el.setSinkId(c.output).catch(() => {}); };
+  const procByUid = new Map(); for (const call of V.calls.values()) if (call._kind === 'voice' && call._proc) procByUid.set(call._uid, call._proc);
+  for (const [uid, a] of V.audios) {
+    const vol = effVol('user', uid), pr = procByUid.get(uid);
+    if (pr) { pr.gain.gain.value = vol; a.volume = 1; } else a.volume = Math.min(1, vol);
+    sink(a);
+  }
+  for (const [uid, sa] of V.screenAudio) { sa.gain.gain.value = effVol('stream', uid); sa.el.muted = V.deaf; sink(sa.el); }
+  document.querySelectorAll('.screen video[data-uid]').forEach(v => { if (!V.screenAudio.has(v.dataset.uid)) v.volume = Math.min(1, effVol('stream', v.dataset.uid)); sink(v); });
 }
+function setupScreenAudio(call) {
+  cleanupScreenAudio(call._uid);
+  const ctx = ac(), s = call._remote;
+  if (!ctx || ctx.state !== 'running' || !s.getAudioTracks().length) return;
+  try {
+    const keep = new Audio(); keep.muted = true; keep.srcObject = s; keep.play().catch(() => {});
+    const src = ctx.createMediaStreamSource(new MediaStream(s.getAudioTracks())), gain = ctx.createGain(), dest = ctx.createMediaStreamDestination();
+    src.connect(gain); gain.connect(dest);
+    const a = el('audio', { autoplay: true }); $('#audios').append(a); a.srcObject = dest.stream; a.play().catch(() => {});
+    V.screenAudio.set(call._uid, { keep, src, gain, dest, el: a });
+    applyOutput();
+  } catch (e) { console.warn(e); }
+}
+function cleanupScreenAudio(uid) { const sa = V.screenAudio.get(uid); if (!sa) return; try { sa.src.disconnect(); } catch {} sa.keep.srcObject = null; sa.el.srcObject = null; sa.el.remove(); V.screenAudio.delete(uid); }
+function volumeSheet(uid, kind) {
+  const p = st.profiles.get(uid), name = p ? p.display_name : 'alguém';
+  let cur = volOf(kind, uid);
+  const pct = el('b', { class: 'vol-pct' });
+  const range = el('input', { type: 'range', min: '0', max: '200', step: '5', value: String(Math.round(cur.v * 100)), class: 'vrange', 'aria-label': 'Volume' });
+  const mute = el('input', { type: 'checkbox', checked: cur.mute });
+  const draw = () => { pct.textContent = cur.mute ? 'Silenciado' : Math.round(cur.v * 100) + '%'; range.disabled = cur.mute; };
+  range.oninput = () => { cur = { ...cur, v: +range.value / 100 }; setVol(kind, uid, cur); draw(); };
+  mute.onchange = () => { cur = { ...cur, mute: mute.checked }; setVol(kind, uid, cur); draw(); };
+  const close = () => { ov.remove(); if (st.view && st.view.kind === 'room') renderRoom(); renderSide(); };
+  const ov = el('div', { class: 'overlay sheet-ov', onclick: e => { if (e.target === ov) close(); } },
+    el('div', { class: 'sheet vol-sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Volume' },
+      el('div', { class: 'vol-head' }, avatarEl(p, 40), el('div', {}, el('b', { text: kind === 'stream' ? 'Transmissão de ' + name : name }), el('small', { class: 'muted', text: kind === 'stream' ? 'Volume da tela compartilhada, só para você' : 'Volume da voz, só para você' })), pct),
+      el('div', { class: 'vrange-row' }, el('span', { 'aria-hidden': 'true', text: '🔈' }), range, el('span', { 'aria-hidden': 'true', text: '🔊' })),
+      el('label', { class: 'check' }, mute, el('span', {}, el('b', { text: 'Silenciar para mim' }), el('br'), el('small', { class: 'muted', text: kind === 'stream' ? 'Você para de ouvir o som desta tela. A imagem continua.' : name + ' não fica sabendo.' }))),
+      el('div', { class: 'upload-row' }, el('button', { class: 'btn small ghost', text: 'Voltar para 100%', onclick: () => { cur = { v: 1, mute: false }; range.value = '100'; mute.checked = false; setVol(kind, uid, cur); draw(); } }),
+        el('button', { class: 'btn small primary', text: 'Pronto', onclick: close }))));
+  draw(); document.body.append(ov);
+}
+function volBadge(kind, uid) { const u = volOf(kind, uid); return u.mute ? el('span', { class: 'vol-badge', title: 'Silenciado para você', text: '🔇' }) : u.v !== 1 ? el('span', { class: 'vol-badge', text: Math.round(u.v * 100) + '%' }) : null; }
 async function useRawMic() {
   const n = V.chain; if (!n || n.bypass) return;
   const raw = rawChain(n.raw);
@@ -1870,17 +1916,25 @@ function renderRoom() {
   const here = V.room === c.id;
   const people = Object.entries(st.presence).filter(([, p]) => p.room === c.id);
   const screens = el('div', { class: 'screens' });
-  const addScreen = (stream, label, muted) => {
+  const addScreen = (stream, label, muted, uid) => {
     const v = el('video', { autoplay: true, playsinline: '' }); v.muted = muted; v.srcObject = stream; v.play().catch(() => {});
+    if (uid) { v.dataset.uid = uid; v.muted = V.deaf || V.screenAudio.has(uid); v.volume = Math.min(1, effVol('stream', uid)); }
     const box = el('div', { class: 'screen' }, v, el('span', { class: 'tag', text: label }));
+    if (uid) { const u = volOf('stream', uid);
+      box.append(el('button', { class: 'screen-vol', 'aria-label': 'Volume da transmissão', title: 'Volume da transmissão', onclick: () => volumeSheet(uid, 'stream') },
+        icon(u.mute ? 'i-mute' : 'i-speaker'), el('span', { text: u.mute ? 'Silenciado' : Math.round(u.v * 100) + '%' }))); }
     box.append(el('button', { class: 'icon-btn full', 'aria-label': 'Tela cheia', onclick: () => (box.requestFullscreen ? box.requestFullscreen().catch(() => {}) : v.webkitEnterFullscreen && v.webkitEnterFullscreen()) }, icon('i-full')));
     screens.append(box);
   };
   if (here && V.screen) addScreen(V.screen, 'Sua tela', true);
-  if (here) for (const [uid, s] of V.screens) addScreen(s, 'Tela de ' + nameOf(uid), V.deaf);
-  const tiles = el('div', { class: 'tiles' }, people.map(([uid, p]) => el('div', { class: 'tile', 'data-speak-tile': uid },
-    avatarEl(st.profiles.get(uid), 64, { speak: true }), el('b', { text: nameOf(uid) }),
-    el('div', { class: 'flags' }, p.sharing ? el('span', { class: 'live', text: 'AO VIVO' }) : null, p.deaf ? icon('i-head-off') : p.muted ? icon('i-mic-off') : null))));
+  if (here) for (const [uid, s] of V.screens) addScreen(s, 'Tela de ' + nameOf(uid), V.deaf, uid);
+  const tiles = el('div', { class: 'tiles' }, people.map(([uid, p]) => {
+    const other = here && uid !== st.uid;
+    return el(other ? 'button' : 'div', { class: 'tile' + (other ? ' clickable' : ''), 'data-speak-tile': uid, title: other ? 'Mudar o volume de ' + nameOf(uid) : null, onclick: other ? () => volumeSheet(uid, 'user') : null },
+      avatarEl(st.profiles.get(uid), 64, { speak: true }), el('b', { text: nameOf(uid) }),
+      el('div', { class: 'flags' }, p.sharing ? el('span', { class: 'live', text: 'AO VIVO' }) : null, p.deaf ? icon('i-head-off') : p.muted ? icon('i-mic-off') : null, other ? volBadge('user', uid) : null),
+      other ? el('small', { class: 'tile-hint', text: 'Toque para o volume' }) : null);
+  }));
   const bar = here
     ? el('div', { class: 'room-bar' },
         el('button', { class: 'btn' + (V.muted ? ' on' : ''), onclick: toggleMute }, icon(V.muted ? 'i-mic-off' : 'i-mic'), lbl(V.muted ? 'Microfone mudo' : 'Microfone')),
@@ -1916,6 +1970,7 @@ async function joinRoom(id) {
 }
 function leaveRoom(quiet) {
   for (const key of [...V.calls.keys()]) closeVCall(key);
+  for (const uid of [...V.screenAudio.keys()]) cleanupScreenAudio(uid);
   if (V.mic) V.mic.getTracks().forEach(t => t.stop());
   if (V.chain) { V.chain.raw.getTracks().forEach(t => t.stop()); if (V.chain.ns) V.chain.ns.destroy(); }
   if (V.screen) V.screen.getTracks().forEach(t => t.stop());
@@ -1964,30 +2019,32 @@ function showCall(call) {
     a.srcObject = call._remote; a.muted = V.deaf; applyOutput(); a.play().catch(() => toast('Toque em qualquer lugar para ouvir a sala.'));
     watch(call._remote, call._uid);
     filterIncoming(call);
-  } else if (call._key.endsWith('screen-in')) { V.screens.set(call._uid, call._remote); if (st.view && st.view.kind === 'room') renderRoom(); }
+  } else if (call._key.endsWith('screen-in')) { V.screens.set(call._uid, call._remote); setupScreenAudio(call); if (st.view && st.view.kind === 'room') renderRoom(); }
 }
 async function filterIncoming(call) {
-  if (call._proc) { call._proc.ns.destroy(); try { call._proc.src.disconnect(); } catch {} call._proc.keep.srcObject = null; call._proc = null; }
+  if (call._proc) { if (call._proc.ns) call._proc.ns.destroy(); try { call._proc.src.disconnect(); } catch {} call._proc.keep.srcObject = null; call._proc = null; }
   const a = V.audios.get(call._uid); if (!a || !call._remote) return;
   const c = V.cfg || voiceCfg(), ctx = ac();
-  if (!c.aiIn || !ctx) { a.srcObject = call._remote; return; }
-  const bin = await ensureNs(ctx); if (!bin || V.calls.get(call._key) !== call) { a.srcObject = call._remote; return; }
+  if (!ctx || ctx.state !== 'running') { a.srcObject = call._remote; applyOutput(); return; }
+  const bin = c.aiIn ? await ensureNs(ctx) : null;
+  if (V.calls.get(call._key) !== call) return;
   try {
     const keep = new Audio(); keep.muted = true; keep.srcObject = call._remote; keep.play().catch(() => {}); // o Chrome só libera o som remoto se ele estiver tocando num elemento
-    const src = ctx.createMediaStreamSource(call._remote), ns = rnnoiseNode(ctx, bin), dest = ctx.createMediaStreamDestination();
-    src.connect(ns); ns.connect(dest);
-    call._proc = { keep, src, ns, dest };
-    a.srcObject = dest.stream; a.play().catch(() => {});
-  } catch (e) { console.warn(e); a.srcObject = call._remote; }
+    const src = ctx.createMediaStreamSource(call._remote), gain = ctx.createGain(), dest = ctx.createMediaStreamDestination();
+    let ns = null; if (bin) { ns = rnnoiseNode(ctx, bin); src.connect(ns); ns.connect(gain); } else src.connect(gain);
+    gain.connect(dest);
+    call._proc = { keep, src, ns, gain, dest };
+    a.srcObject = dest.stream; a.play().catch(() => {}); applyOutput();
+  } catch (e) { console.warn(e); a.srcObject = call._remote; applyOutput(); }
 }
 function refreshIncoming() { for (const c of V.calls.values()) if (c._kind === 'voice' && c._ok && c._remote) filterIncoming(c); }
 function callClosed(call) {
   if (V.calls.get(call._key) !== call) return;
   V.calls.delete(call._key); delete V.checks[call.connectionId];
   if (call._out) call._out.getTracks().forEach(t => t.stop());
-  if (call._proc) { call._proc.ns.destroy(); call._proc.keep.srcObject = null; call._proc = null; }
+  if (call._proc) { if (call._proc.ns) call._proc.ns.destroy(); try { call._proc.src.disconnect(); } catch {} call._proc.keep.srcObject = null; call._proc = null; }
   if (call._kind === 'voice') { const a = V.audios.get(call._uid); if (a) { a.srcObject = null; a.remove(); V.audios.delete(call._uid); } delete meters[call._uid]; }
-  if (call._key.endsWith('screen-in')) { V.screens.delete(call._uid); if (st.view && st.view.kind === 'room') renderRoom(); }
+  if (call._key.endsWith('screen-in')) { V.screens.delete(call._uid); cleanupScreenAudio(call._uid); if (st.view && st.view.kind === 'room') renderRoom(); }
 }
 function closeVCall(key) { const c = V.calls.get(key); if (!c) return; try { c.close(); } catch {} callClosed(c); }
 
@@ -2027,7 +2084,7 @@ function applyMic() {
   if (V.mic) V.mic.getAudioTracks().forEach(t => t.enabled = !V.muted);
   for (const c of V.calls.values()) if (c._kind === 'voice' && c._ok && c._out) c._out.getAudioTracks().forEach(t => t.enabled = !V.muted);
 }
-function applyDeaf() { for (const a of V.audios.values()) a.muted = V.deaf; document.querySelectorAll('.screen video').forEach(v => { if (v.srcObject !== V.screen) v.muted = V.deaf; }); }
+function applyDeaf() { for (const a of V.audios.values()) a.muted = V.deaf; for (const sa of V.screenAudio.values()) sa.el.muted = V.deaf; document.querySelectorAll('.screen video[data-uid]').forEach(v => { v.muted = V.deaf || V.screenAudio.has(v.dataset.uid); }); }
 async function toggleScreen() {
   if (!V.room) return;
   if (V.screen) return stopScreen();
