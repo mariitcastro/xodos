@@ -532,3 +532,12 @@ button.vu:hover { background: var(--panel); color: var(--fg); }
 .vol-head { display: flex; align-items: center; gap: 12px; }
 .vol-head > div:not(.av) { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .vol-pct { font-size: 18px; font-weight: 800; color: var(--hot); white-space: nowrap; }
+
+/* janelinha / mini-tela */
+.screen .pip-btn { position: absolute; right: 52px; top: 8px; background: rgba(0,0,0,.55); color: #fff; }
+.mini-player { position: fixed; right: max(16px, env(safe-area-inset-right, 0px)); bottom: calc(96px + env(safe-area-inset-bottom, 0px)); width: min(320px, 56vw); aspect-ratio: 16 / 9; background: #000; border-radius: 14px; overflow: hidden; z-index: 45; box-shadow: 0 16px 40px rgba(0,0,0,.5); border: 2px solid var(--hot); }
+.mini-player video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.mini-player .tag { position: absolute; left: 8px; bottom: 8px; background: rgba(0,0,0,.65); color: #fff; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; }
+.mini-acts { position: absolute; right: 6px; top: 6px; display: flex; gap: 4px; }
+.mini-acts .icon-btn { width: 32px; height: 32px; background: rgba(0,0,0,.6); color: #fff; }
+.mini-acts .icon-btn svg { width: 16px; height: 16px; }

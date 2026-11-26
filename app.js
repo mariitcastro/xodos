@@ -19,7 +19,7 @@ const st = {
   view: null, mode: 'server', msgs: new Map(), plain: new Map(), unread: new Set(),
   presence: {}, online: new Set(), lobby: null, adminUnlocked: false, db: null
 };
-const V = { screenAudio: new Map(), room: null, peer: null, peerId: null, mic: null, screen: null, muted: false, deaf: false,
+const V = { screenAudio: new Map(), screenVideos: new Map(), miniClosed: false, room: null, peer: null, peerId: null, mic: null, screen: null, muted: false, deaf: false,
   calls: new Map(), screens: new Map(), checks: {}, speaking: {}, audios: new Map() };
 const $ = sel => document.querySelector(sel);
 const KAKA = { id: 'kaka', bot: true, approved: true, role: 'bot', username: 'kaka', display_name: 'Kaká',
@@ -611,7 +611,7 @@ function setView(v) {
   $('#app').classList.remove('show-nav');
   st.mode = (v.kind === 'dm' || v.kind === 'kaka') ? 'dms' : 'server';
   if (st.mode === 'server') { const ch = st.channels.find(c => c.id === v.id); if (ch) { st.server = ch.server_id; st.lastView[ch.server_id] = v; } }
-  renderAll(); renderMain(); updateTitle();
+  renderAll(); renderMain(); updateTitle(); renderMini();
 }
 function topBar(...mid) {
   return el('header', { class: 'top' },
@@ -1225,7 +1225,7 @@ function accountPanel() {
 
 
 /* ---------------- voz e áudio: configurações ---------------- */
-const VOICE_DEFAULT = { input: '', output: '', mode: 'voice', ai: true, aiIn: true, noise: true, echo: true, agc: true, gateAuto: true, gate: -55, inVol: 1, outVol: 1 };
+const VOICE_DEFAULT = { autoPip: true, input: '', output: '', mode: 'voice', ai: true, aiIn: true, noise: true, echo: true, agc: true, gateAuto: true, gate: -55, inVol: 1, outVol: 1 };
 function voiceCfg() { try { return Object.assign({}, VOICE_DEFAULT, JSON.parse(localStorage.getItem('xodos-voice') || '{}')); } catch { return { ...VOICE_DEFAULT }; } }
 function saveVoiceCfg(c) { try { localStorage.setItem('xodos-voice', JSON.stringify(c)); } catch {} }
 const canPickOutput = () => 'setSinkId' in HTMLMediaElement.prototype;
@@ -1330,7 +1330,7 @@ function applyOutput() {
     sink(a);
   }
   for (const [uid, sa] of V.screenAudio) { sa.gain.gain.value = effVol('stream', uid); sa.el.muted = V.deaf; sink(sa.el); }
-  document.querySelectorAll('.screen video[data-uid]').forEach(v => { if (!V.screenAudio.has(v.dataset.uid)) v.volume = Math.min(1, effVol('stream', v.dataset.uid)); sink(v); });
+  document.querySelectorAll('video[data-uid]').forEach(v => { if (!V.screenAudio.has(v.dataset.uid)) v.volume = Math.min(1, effVol('stream', v.dataset.uid)); sink(v); });
 }
 function setupScreenAudio(call) {
   cleanupScreenAudio(call._uid);
@@ -1459,6 +1459,8 @@ function voicePanel() {
       el('h3', { class: 'section-title', text: 'Sensibilidade do microfone' }),
       toggle('gateAuto', 'Automática', 'O microfone só manda som quando você fala.'),
       c.gateAuto ? null : range(-90, -10, 1, c.gate, v => v + ' dB', v => { c.gate = v; saveVoiceCfg(c); V.cfg = c; meterThr.style.left = ((v + 90) / 90 * 100) + '%'; }),
+      el('h3', { class: 'section-title', text: 'Transmissão' }),
+      toggle('autoPip', 'Janelinha ao sair do app', 'Quando você sai do Xodó\'S assistindo uma tela, ela continua numa janelinha flutuante (se o celular permitir).'),
       el('h3', { class: 'section-title', text: 'Volume' }),
       el('div', { class: 'field' }, el('span', { class: 'label', text: 'Volume do meu microfone' }), range(0, 2, .05, c.inVol, v => Math.round(v * 100) + '%', v => { c.inVol = v; saveVoiceCfg(c); V.cfg = c; if (V.chain && V.chain.gain) V.chain.gain.gain.value = v; if (test && test.gain) test.gain.gain.value = v; })),
       el('div', { class: 'field' }, el('span', { class: 'label', text: 'Volume das pessoas' }), range(0, 1, .05, c.outVol, v => Math.round(v * 100) + '%', v => { c.outVol = v; saveVoiceCfg(c); V.cfg = c; applyOutput(); })),
@@ -1865,6 +1867,63 @@ function mentionPicker(ta, wrap, v) {
   });
 }
 
+
+/* ---------------- janelinha da transmissão (Picture-in-Picture) e mini-tela ---------------- */
+function screenVideo(uid, stream) {
+  let v = V.screenVideos.get(uid);
+  if (!v) {
+    v = el('video', { autoplay: true, playsinline: '', autopictureinpicture: '' });
+    v.dataset.uid = uid;
+    try { v.autoPictureInPicture = true; } catch {}
+    v.addEventListener('leavepictureinpicture', () => { if (st.view && st.view.kind === 'room') renderRoom(); else renderMini(); });
+    V.screenVideos.set(uid, v);
+  }
+  if (v.srcObject !== stream) v.srcObject = stream;
+  v.muted = V.deaf || V.screenAudio.has(uid); v.volume = Math.min(1, effVol('stream', uid));
+  v.play().catch(() => {});
+  return v;
+}
+function dropScreenVideo(uid) {
+  const v = V.screenVideos.get(uid); if (!v) return;
+  if (document.pictureInPictureElement === v) document.exitPictureInPicture().catch(() => {});
+  v.srcObject = null; v.remove(); V.screenVideos.delete(uid);
+}
+const canPip = v => !!(v && ((document.pictureInPictureEnabled && v.requestPictureInPicture) || v.webkitSupportsPresentationMode && v.webkitSupportsPresentationMode('picture-in-picture')));
+async function openPip(v) {
+  try {
+    if (document.pictureInPictureElement === v) return document.exitPictureInPicture();
+    if (v.requestPictureInPicture) await v.requestPictureInPicture();
+    else if (v.webkitSetPresentationMode) v.webkitSetPresentationMode('picture-in-picture');
+  } catch { toast('Este aparelho não deixou abrir a janelinha. Tente pela tela cheia e depois saia do app.'); }
+}
+function firstScreenVideo() { for (const [uid] of V.screens) { const v = V.screenVideos.get(uid); if (v) return v; } return null; }
+// ao sair do app: tenta abrir a janelinha sozinha (o celular decide se deixa)
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden || !(V.cfg || voiceCfg()).autoPip || document.pictureInPictureElement) return;
+  const v = firstScreenVideo(); if (!v) return;
+  if (v.requestPictureInPicture) v.requestPictureInPicture().catch(() => {});
+  else if (v.webkitSetPresentationMode) { try { v.webkitSetPresentationMode('picture-in-picture'); } catch {} }
+});
+try { navigator.mediaSession && navigator.mediaSession.setActionHandler('enterpictureinpicture', async () => { const v = firstScreenVideo(); if (v && (V.cfg || voiceCfg()).autoPip) await v.requestPictureInPicture(); }); } catch {}
+// mini-tela dentro do Xodó'S quando você sai da sala para outro canal
+function renderMini() {
+  let box = $('#mini');
+  const watching = V.room && V.screens.size && !(st.view && st.view.kind === 'room') && !V.miniClosed;
+  const uid = watching ? [...V.screens.keys()][0] : null, v = uid && V.screenVideos.get(uid);
+  if (!v || document.pictureInPictureElement === v) { if (box) box.remove(); return; }
+  if (!box) {
+    box = el('div', { id: 'mini', class: 'mini-player', role: 'region', 'aria-label': 'Mini-tela da transmissão' });
+    document.body.append(box);
+  }
+  box.replaceChildren(v,
+    el('span', { class: 'tag', text: 'Tela de ' + nameOf(uid) }),
+    el('div', { class: 'mini-acts' },
+      canPip(v) ? el('button', { class: 'icon-btn', 'aria-label': 'Janelinha flutuante', title: 'Janelinha flutuante', onclick: () => openPip(v) }, icon('i-pip')) : null,
+      el('button', { class: 'icon-btn', 'aria-label': 'Voltar para a sala', title: 'Voltar para a sala', onclick: () => openRoom(V.room) }, icon('i-full')),
+      el('button', { class: 'icon-btn', 'aria-label': 'Fechar mini-tela', title: 'Fechar', onclick: () => { V.miniClosed = true; renderMini(); } }, icon('i-x'))));
+  v.play().catch(() => {});
+}
+
 /* ---------------- tempo real ---------------- */
 function subscribeDb() {
   st.db = sb.channel('db')
@@ -1917,9 +1976,11 @@ function renderRoom() {
   const people = Object.entries(st.presence).filter(([, p]) => p.room === c.id);
   const screens = el('div', { class: 'screens' });
   const addScreen = (stream, label, muted, uid) => {
-    const v = el('video', { autoplay: true, playsinline: '' }); v.muted = muted; v.srcObject = stream; v.play().catch(() => {});
-    if (uid) { v.dataset.uid = uid; v.muted = V.deaf || V.screenAudio.has(uid); v.volume = Math.min(1, effVol('stream', uid)); }
+    let v;
+    if (uid) v = screenVideo(uid, stream);
+    else { v = el('video', { autoplay: true, playsinline: '' }); v.muted = muted; v.srcObject = stream; v.play().catch(() => {}); }
     const box = el('div', { class: 'screen' }, v, el('span', { class: 'tag', text: label }));
+    if (uid && canPip(v)) box.append(el('button', { class: 'icon-btn pip-btn', 'aria-label': 'Janelinha flutuante', title: 'Janelinha flutuante (continua ao sair do app)', onclick: () => openPip(v) }, icon('i-pip')));
     if (uid) { const u = volOf('stream', uid);
       box.append(el('button', { class: 'screen-vol', 'aria-label': 'Volume da transmissão', title: 'Volume da transmissão', onclick: () => volumeSheet(uid, 'stream') },
         icon(u.mute ? 'i-mute' : 'i-speaker'), el('span', { text: u.mute ? 'Silenciado' : Math.round(u.v * 100) + '%' }))); }
@@ -1971,6 +2032,7 @@ async function joinRoom(id) {
 function leaveRoom(quiet) {
   for (const key of [...V.calls.keys()]) closeVCall(key);
   for (const uid of [...V.screenAudio.keys()]) cleanupScreenAudio(uid);
+  for (const uid of [...V.screenVideos.keys()]) dropScreenVideo(uid);
   if (V.mic) V.mic.getTracks().forEach(t => t.stop());
   if (V.chain) { V.chain.raw.getTracks().forEach(t => t.stop()); if (V.chain.ns) V.chain.ns.destroy(); }
   if (V.screen) V.screen.getTracks().forEach(t => t.stop());
@@ -2019,7 +2081,7 @@ function showCall(call) {
     a.srcObject = call._remote; a.muted = V.deaf; applyOutput(); a.play().catch(() => toast('Toque em qualquer lugar para ouvir a sala.'));
     watch(call._remote, call._uid);
     filterIncoming(call);
-  } else if (call._key.endsWith('screen-in')) { V.screens.set(call._uid, call._remote); setupScreenAudio(call); if (st.view && st.view.kind === 'room') renderRoom(); }
+  } else if (call._key.endsWith('screen-in')) { V.screens.set(call._uid, call._remote); setupScreenAudio(call); screenVideo(call._uid, call._remote); V.miniClosed = false; if (st.view && st.view.kind === 'room') renderRoom(); else renderMini(); }
 }
 async function filterIncoming(call) {
   if (call._proc) { if (call._proc.ns) call._proc.ns.destroy(); try { call._proc.src.disconnect(); } catch {} call._proc.keep.srcObject = null; call._proc = null; }
@@ -2044,7 +2106,7 @@ function callClosed(call) {
   if (call._out) call._out.getTracks().forEach(t => t.stop());
   if (call._proc) { if (call._proc.ns) call._proc.ns.destroy(); try { call._proc.src.disconnect(); } catch {} call._proc.keep.srcObject = null; call._proc = null; }
   if (call._kind === 'voice') { const a = V.audios.get(call._uid); if (a) { a.srcObject = null; a.remove(); V.audios.delete(call._uid); } delete meters[call._uid]; }
-  if (call._key.endsWith('screen-in')) { V.screens.delete(call._uid); cleanupScreenAudio(call._uid); if (st.view && st.view.kind === 'room') renderRoom(); }
+  if (call._key.endsWith('screen-in')) { V.screens.delete(call._uid); cleanupScreenAudio(call._uid); dropScreenVideo(call._uid); if (st.view && st.view.kind === 'room') renderRoom(); renderMini(); }
 }
 function closeVCall(key) { const c = V.calls.get(key); if (!c) return; try { c.close(); } catch {} callClosed(c); }
 
@@ -2084,7 +2146,7 @@ function applyMic() {
   if (V.mic) V.mic.getAudioTracks().forEach(t => t.enabled = !V.muted);
   for (const c of V.calls.values()) if (c._kind === 'voice' && c._ok && c._out) c._out.getAudioTracks().forEach(t => t.enabled = !V.muted);
 }
-function applyDeaf() { for (const a of V.audios.values()) a.muted = V.deaf; for (const sa of V.screenAudio.values()) sa.el.muted = V.deaf; document.querySelectorAll('.screen video[data-uid]').forEach(v => { v.muted = V.deaf || V.screenAudio.has(v.dataset.uid); }); }
+function applyDeaf() { for (const a of V.audios.values()) a.muted = V.deaf; for (const sa of V.screenAudio.values()) sa.el.muted = V.deaf; document.querySelectorAll('video[data-uid]').forEach(v => { v.muted = V.deaf || V.screenAudio.has(v.dataset.uid); }); }
 async function toggleScreen() {
   if (!V.room) return;
   if (V.screen) return stopScreen();
