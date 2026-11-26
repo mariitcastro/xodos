@@ -19,7 +19,7 @@ const st = {
   view: null, mode: 'server', msgs: new Map(), plain: new Map(), unread: new Set(),
   presence: {}, online: new Set(), lobby: null, adminUnlocked: false, db: null
 };
-const V = { screenAudio: new Map(), screenVideos: new Map(), miniClosed: false, room: null, peer: null, peerId: null, mic: null, screen: null, muted: false, deaf: false,
+const V = { screenNoAudio: new Set(), screenAudio: new Map(), screenVideos: new Map(), miniClosed: false, room: null, peer: null, peerId: null, mic: null, screen: null, muted: false, deaf: false,
   calls: new Map(), screens: new Map(), checks: {}, speaking: {}, audios: new Map() };
 const $ = sel => document.querySelector(sel);
 const KAKA = { id: 'kaka', bot: true, approved: true, role: 'bot', username: 'kaka', display_name: 'Kaká',
@@ -1227,8 +1227,8 @@ function accountPanel() {
 
 /* ---------------- voz e áudio: configurações ---------------- */
 const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-const VOICE_DEFAULT = { bgSafe: IS_IOS, autoPip: true, input: '', output: '', mode: 'voice', ai: true, aiIn: true, noise: true, echo: true, agc: true, gateAuto: true, gate: -55, inVol: 1, outVol: 1 };
-function voiceCfg() { try { return Object.assign({}, VOICE_DEFAULT, JSON.parse(localStorage.getItem('xodos-voice') || '{}')); } catch { return { ...VOICE_DEFAULT }; } }
+const VOICE_DEFAULT = { bgSafe: false, autoPip: true, input: '', output: '', mode: 'voice', ai: true, aiIn: true, noise: true, echo: true, agc: true, gateAuto: true, gate: -55, inVol: 1, outVol: 1 };
+function voiceCfg() { try { return Object.assign({}, VOICE_DEFAULT, JSON.parse(localStorage.getItem('xodos-voice') || '{}'), { bgSafe: false }); } catch { return { ...VOICE_DEFAULT }; } }
 function saveVoiceCfg(c) { try { localStorage.setItem('xodos-voice', JSON.stringify(c)); } catch {} }
 const canPickOutput = () => 'setSinkId' in HTMLMediaElement.prototype;
 function micConstraints(c) {
@@ -1332,24 +1332,30 @@ function applyOutput() {
     if (pr) { pr.gain.gain.value = vol; a.volume = 1; } else a.volume = Math.min(1, vol);
     sink(a);
   }
-  for (const [uid, sa] of V.screenAudio) { sa.gain.gain.value = effVol('stream', uid); sa.el.muted = V.deaf; sink(sa.el); }
-  document.querySelectorAll('video[data-uid]').forEach(v => { if (!V.screenAudio.has(v.dataset.uid)) v.volume = Math.min(1, effVol('stream', v.dataset.uid)); sink(v); });
+  for (const [uid, sa] of V.screenAudio) { const vol = effVol('stream', uid); if (sa.gain) { sa.gain.gain.value = vol; sa.el.volume = 1; } else sa.el.volume = Math.min(1, vol); sa.el.muted = V.deaf; sink(sa.el); }
+  document.querySelectorAll('video[data-uid]').forEach(v => { v.muted = true; });
 }
 function setupScreenAudio(call) {
   cleanupScreenAudio(call._uid);
-  if ((V.cfg || voiceCfg()).bgSafe) { applyOutput(); return; } // o próprio vídeo toca o som
-  const ctx = ac(), s = call._remote;
-  if (!ctx || ctx.state !== 'running' || !s.getAudioTracks().length) return;
-  try {
-    const keep = new Audio(); keep.muted = true; keep.srcObject = s; keep.play().catch(() => {});
-    const src = ctx.createMediaStreamSource(new MediaStream(s.getAudioTracks())), gain = ctx.createGain(), dest = ctx.createMediaStreamDestination();
-    src.connect(gain); gain.connect(dest);
-    const a = el('audio', { autoplay: true }); $('#audios').append(a); a.srcObject = dest.stream; a.play().catch(() => {});
-    V.screenAudio.set(call._uid, { keep, src, gain, dest, el: a });
-    applyOutput();
-  } catch (e) { console.warn(e); }
+  const s = call._remote, tracks = s.getAudioTracks();
+  if (!tracks.length) { V.screenNoAudio.add(call._uid); return; }
+  V.screenNoAudio.delete(call._uid);
+  const a = el('audio', { autoplay: true }); $('#audios').append(a);
+  const entry = { el: a, gain: null, src: null, keep: null };
+  const ctx = ac();
+  if (ctx && ctx.state === 'running') {
+    try {
+      const keep = new Audio(); keep.muted = true; keep.srcObject = s; keep.play().catch(() => {});
+      const src = ctx.createMediaStreamSource(new MediaStream(tracks)), gain = ctx.createGain(), dest = ctx.createMediaStreamDestination();
+      src.connect(gain); gain.connect(dest);
+      Object.assign(entry, { keep, src, gain }); a.srcObject = dest.stream;
+    } catch (e) { console.warn(e); a.srcObject = new MediaStream(tracks); }
+  } else a.srcObject = new MediaStream(tracks); // som direto, igual às vozes
+  V.screenAudio.set(call._uid, entry);
+  a.play().catch(() => toast('Toque em qualquer lugar para ouvir o som da transmissão.'));
+  applyOutput();
 }
-function cleanupScreenAudio(uid) { const sa = V.screenAudio.get(uid); if (!sa) return; try { sa.src.disconnect(); } catch {} sa.keep.srcObject = null; sa.el.srcObject = null; sa.el.remove(); V.screenAudio.delete(uid); }
+function cleanupScreenAudio(uid) { V.screenNoAudio.delete(uid); const sa = V.screenAudio.get(uid); if (!sa) return; try { sa.src && sa.src.disconnect(); } catch {} if (sa.keep) sa.keep.srcObject = null; sa.el.srcObject = null; sa.el.remove(); V.screenAudio.delete(uid); }
 function volumeSheet(uid, kind) {
   const p = st.profiles.get(uid), name = p ? p.display_name : 'alguém';
   let cur = volOf(kind, uid);
@@ -1460,10 +1466,7 @@ function voicePanel() {
         modeOpt('voice', '🗣️ Voz', 'Melhor sem fone. Tira eco e ruído, mas no celular o som fica com cara de ligação.'),
         modeOpt('hq', '🎧 Alta qualidade', 'Use com fone. Som estéreo e mais nítido, sem o "modo ligação" do celular.')),
       hq ? el('p', { class: 'vnote', text: 'No modo alta qualidade o cancelamento de eco fica desligado. Sem fone, as pessoas podem ouvir o próprio eco. No iPhone o sistema ainda trata o microfone ligado como chamada, mas o som que você manda fica melhor.' }) : null,
-      el('h3', { class: 'section-title', text: 'Celular' }),
-      toggleBg(),
       el('h3', { class: 'section-title', text: 'Processamento de voz' }),
-      c.bgSafe ? el('p', { class: 'vnote', text: 'O Modo segundo plano está ligado, então a IA de ruído e o volume acima de 100% ficam desligados. Para usar a IA, desligue o modo (a call pode ficar muda quando você sair do app).' }) : null,
       toggle('ai', 'Supressão de ruído forte (IA) ✨', 'Limpa o barulho em volta o tempo todo, até enquanto você fala: rua, TV, ventilador, cachorro, teclado.', c.bgSafe),
       c.bgSafe ? null : toggleIn(),
       toggle('noise', 'Supressão de ruído do navegador', 'Uma limpeza mais leve, que soma com a de cima.'),
@@ -1901,7 +1904,7 @@ function screenVideo(uid, stream) {
     V.screenVideos.set(uid, v);
   }
   if (v.srcObject !== stream) v.srcObject = stream;
-  v.muted = V.deaf || V.screenAudio.has(uid); v.volume = Math.min(1, effVol('stream', uid));
+  v.muted = true;
   v.play().catch(() => {});
   return v;
 }
@@ -2002,6 +2005,10 @@ function renderRoom() {
     if (uid) v = screenVideo(uid, stream);
     else { v = keepLive(el('video', { autoplay: true, playsinline: '' })); v.muted = muted; v.srcObject = stream; v.play().catch(() => {}); }
     const box = el('div', { class: 'screen' }, v, el('span', { class: 'tag', text: label }));
+    if (uid) box.append(V.screenNoAudio.has(uid)
+      ? el('span', { class: 'sound-chip off', title: 'Quem transmite não mandou o som. No computador: compartilhar a "Tela inteira" e marcar "Compartilhar áudio do sistema".', text: '🔇 sem som' })
+      : el('span', { class: 'sound-chip', text: '🔊 com som' }));
+    else if (V.screen) box.append(el('span', { class: 'sound-chip' + (V.screen.getAudioTracks().length ? '' : ' off'), text: V.screen.getAudioTracks().length ? '🔊 mandando som' : '🔇 sem som' }));
     if (uid && canPip(v)) box.append(el('button', { class: 'icon-btn pip-btn', 'aria-label': 'Janelinha flutuante', title: 'Janelinha flutuante (continua ao sair do app)', onclick: () => openPip(v) }, icon('i-pip')));
     if (uid) { const u = volOf('stream', uid);
       box.append(el('button', { class: 'screen-vol', 'aria-label': 'Volume da transmissão', title: 'Volume da transmissão', onclick: () => volumeSheet(uid, 'stream') },
@@ -2182,7 +2189,7 @@ function applyMic() {
   if (V.mic) V.mic.getAudioTracks().forEach(t => t.enabled = !V.muted);
   for (const c of V.calls.values()) if (c._kind === 'voice' && c._ok && c._out) c._out.getAudioTracks().forEach(t => t.enabled = !V.muted);
 }
-function applyDeaf() { for (const a of V.audios.values()) a.muted = V.deaf; for (const sa of V.screenAudio.values()) sa.el.muted = V.deaf; document.querySelectorAll('video[data-uid]').forEach(v => { v.muted = V.deaf || V.screenAudio.has(v.dataset.uid); }); }
+function applyDeaf() { for (const a of V.audios.values()) a.muted = V.deaf; for (const sa of V.screenAudio.values()) sa.el.muted = V.deaf; document.querySelectorAll('video[data-uid]').forEach(v => { v.muted = true; }); }
 /* transmissão no estilo "Go Live": escolhe o tipo e ajusta qualidade, fluidez e som */
 const SHARE_PRESETS = {
   game: { label: '🎮 Jogo', desc: 'Fluido, 60 quadros por segundo. Ideal para jogos e coisas que mexem rápido.', fps: 60, w: 1280, h: 720, hint: 'motion', bitrate: 4500000, keep: 'maintain-framerate' },
