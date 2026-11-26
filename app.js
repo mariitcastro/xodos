@@ -1292,7 +1292,7 @@ function micErrorText(e) {
 }
 function dbOf(node) { node.an.getFloatTimeDomainData(node.buf); let s = 0; for (const v of node.buf) s += v * v; return 20 * Math.log10(Math.sqrt(s / node.buf.length) + 1e-9); }
 setInterval(() => {
-  const n = V.chain; if (!n || n.bypass) return;
+  const n = V.chain; if (!n || n.bypass || bgMode) return;
   if (n.gate.context.state !== 'running') {
     n.gate.context.resume().catch(() => {});
     n.sleepSince = n.sleepSince || performance.now();
@@ -1366,6 +1366,49 @@ function volumeSheet(uid, kind) {
   draw(); document.body.append(ov);
 }
 function volBadge(kind, uid) { const u = volOf(kind, uid); return u.mute ? el('span', { class: 'vol-badge', title: 'Silenciado para você', text: '🔇' }) : u.v !== 1 ? el('span', { class: 'vol-badge', text: Math.round(u.v * 100) + '%' }) : null; }
+/* segundo plano no celular: o iPhone desliga o processador de áudio, então troca tudo para o som direto e volta depois */
+let bgMode = false;
+async function swapOutTracks(stream) {
+  for (const call of V.calls.values()) {
+    if (call._kind !== 'voice' || !call.peerConnection || !stream) continue;
+    const out = stream.clone(); out.getTracks().forEach(t => t.enabled = call._ok ? !V.muted : false);
+    const sender = call.peerConnection.getSenders().find(x => x.track && x.track.kind === 'audio');
+    if (!sender) continue;
+    await sender.replaceTrack(out.getAudioTracks()[0]).catch(() => {});
+    if (call._out) call._out.getTracks().forEach(t => t.stop());
+    call._out = out;
+  }
+}
+function enterBg() {
+  if (!V.room || bgMode) return; bgMode = true;
+  if (V.chain && !V.chain.bypass) swapOutTracks(V.chain.raw);
+  for (const call of V.calls.values()) {
+    if (call._kind !== 'voice' || !call._remote) continue;
+    const a = V.audios.get(call._uid); if (!a) continue;
+    a.srcObject = call._remote; a.volume = Math.min(1, effVol('user', call._uid)); a.muted = V.deaf; a.play().catch(() => {});
+  }
+  for (const [uid, sa] of V.screenAudio) {
+    sa.el.muted = true;
+    const v = V.screenVideos.get(uid); if (v) { v.muted = V.deaf || volOf('stream', uid).mute; v.volume = Math.min(1, effVol('stream', uid)); v.play().catch(() => {}); }
+  }
+}
+function exitBg() {
+  if (!bgMode) return; bgMode = false;
+  const a = ac(); if (a && a.state !== 'running') a.resume().catch(() => {});
+  setTimeout(async () => {
+    if (bgMode || !V.room) return;
+    const ctx = ac();
+    if (ctx && ctx.state !== 'running') { await Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 800))]).catch(() => {}); }
+    if (!ctx || ctx.state !== 'running') return; // segue no som direto se o processador não acordar
+    if (V.chain && !V.chain.bypass) swapOutTracks(V.chain.stream);
+    refreshIncoming();
+    for (const [uid, sa] of V.screenAudio) { sa.el.muted = V.deaf; const v = V.screenVideos.get(uid); if (v) v.muted = true; }
+    applyOutput();
+  }, 300);
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) enterBg(); else exitBg(); });
+window.addEventListener('pagehide', enterBg);
+window.addEventListener('pageshow', () => { if (!document.hidden) exitBg(); });
 async function useRawMic() {
   const n = V.chain; if (!n || n.bypass) return;
   const raw = rawChain(n.raw);
