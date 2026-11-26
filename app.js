@@ -1490,7 +1490,7 @@ function voicePanel() {
 function openVoiceSettings() { openSettings('voz'); }
 
 /* ---------------- aparência (claro / escuro) ---------------- */
-function currentTheme() { return document.documentElement.getAttribute('data-theme') || 'dark'; }
+function currentTheme() { return document.documentElement.getAttribute('data-theme') || 'light'; }
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
   try { localStorage.setItem('xodos-theme', t); } catch {}
@@ -1498,7 +1498,7 @@ function applyTheme(t) {
   if (m) m.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#17111a');
 }
 function themePanel() {
-  const opts = [['dark', 'Escuro', 'Rosa à meia-luz'], ['light', 'Claro', 'Rosinha e clarinho'], ['auto', 'Automático', 'Segue o seu aparelho']];
+  const opts = [['light', 'Rosinha 🎀', 'Clarinho, com corações e lacinhos'], ['dark', 'Noite rosa 🌙', 'Escurinho e aconchegante'], ['auto', 'Automático', 'Segue o seu aparelho']];
   const grid = el('div', { class: 'theme-grid', role: 'radiogroup', 'aria-label': 'Tema' });
   const draw = () => grid.replaceChildren(...opts.map(([k, name, desc]) => el('button', { class: 'theme-opt' + (currentTheme() === k ? ' active' : ''), role: 'radio', 'aria-checked': String(currentTheme() === k), onclick: () => { applyTheme(k); draw(); } },
     el('div', { class: 'theme-prev ' + k, 'aria-hidden': 'true' }, el('i', { class: 'r' }), el('i', { class: 's' }), el('div', { class: 'c' }, el('span'), el('span'), el('span'))),
