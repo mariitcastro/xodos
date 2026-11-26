@@ -1099,23 +1099,32 @@ function modal(title, body, opts = {}) {
   const close = () => { ov.remove(); document.removeEventListener('keydown', onKey); opts.onClose && opts.onClose(); };
   const onKey = e => { if (e.key === 'Escape') close(); };
   const ov = el('div', { class: 'overlay', onclick: e => { if (e.target === ov) close(); } },
-    el('div', { class: 'modal' + (opts.wide ? ' wide' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+    el('div', { class: 'modal' + (opts.wide ? ' wide' : '') + (opts.bare ? ' bare' : ''), role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
       el('div', { class: 'modal-head' }, el('h2', { text: title }), el('button', { class: 'icon-btn', 'aria-label': 'Fechar', onclick: close }, icon('i-x'))),
       el('div', { class: 'modal-body' }, body)));
   document.addEventListener('keydown', onKey); document.body.append(ov);
   return close;
 }
-function profileCard(p) {
-  const banner = el('div', { class: 'banner' });
+function profileCard(p, opts = {}) {
+  const sty = styleOf(p), themed = !!(sty.p && sty.a);
+  const banner = el('div', { class: 'pc-banner' });
   if (p.banner_path) signedUrl('profiles', p.banner_path).then(u => { if (u) banner.append(el('img', { src: u, alt: '' })); });
-  const sty = styleOf(p), themed = sty.p && sty.a;
-  if (themed && !p.banner_path) banner.style.background = `linear-gradient(135deg, ${sty.p}, ${sty.a})`;
-  return el('div', { class: 'pcard' + (themed ? ' themed' : ''), style: themed ? `--tp:${sty.p};--ta:${sty.a}` : null }, banner, el('div', { class: 'avwrap' }, avatarEl(p, 88, { dot: true })),
-    el('div', { class: 'info' }, el('b', {}, el('span', { class: 'pname', text: p.display_name || '—', style: nameStyle(p) }), p.role === 'admin' ? el('span', { class: 'crown', text: ' ♛ admin' }) : null, p.bot ? el('span', { class: 'bot-tag', text: 'BOT' }) : null),
-      el('span', { class: 'user', text: '@' + (p.username || '') + (p.pronouns ? ' · ' + p.pronouns : '') }),
-      p.status ? el('div', { class: 'status', text: p.status }) : null,
-      p.bio ? el('div', { class: 'bio', text: p.bio }) : null,
-      p.created_at ? el('small', { class: 'muted', text: 'No Xodó\'S desde ' + new Date(p.created_at).toLocaleDateString('pt-BR') }) : null));
+  else if (themed) banner.style.background = `linear-gradient(135deg, ${sty.p}, color-mix(in srgb, ${sty.p} 70%, ${sty.a}))`;
+  const section = (title, ...kids) => el('div', { class: 'pc-sec' }, el('h4', { text: title }), ...kids);
+  const badges = [];
+  if (p.role === 'admin') badges.push(el('span', { class: 'pc-badge', title: 'Administração do Xodó\'S', text: '♛ Admin' }));
+  if (p.bot) badges.push(el('span', { class: 'bot-tag', text: 'BOT' }));
+  return el('div', { class: 'pcard2' + (themed ? ' themed' : ''), style: themed ? `--tp:${sty.p};--ta:${sty.a}` : null },
+    banner,
+    el('div', { class: 'pc-top' }, el('div', { class: 'pc-av' }, avatarEl(p, 92, { dot: true })),
+      p.status ? el('div', { class: 'pc-bubble', title: 'Status' }, el('span', { text: p.status })) : null,
+      badges.length ? el('div', { class: 'pc-badges' }, ...badges) : null),
+    el('div', { class: 'pc-body' },
+      el('div', { class: 'pc-name' }, el('span', { class: 'pname', text: p.display_name || '—', style: nameStyle(p) })),
+      el('div', { class: 'pc-user' }, el('span', { text: '@' + (p.username || '') }), p.pronouns ? el('span', { class: 'pc-pron', text: p.pronouns }) : null),
+      p.bio ? section('Sobre mim', el('div', { class: 'pc-bio', text: p.bio })) : null,
+      p.created_at ? section('Membro desde', el('div', { class: 'pc-since', text: '🎀 ' + new Date(p.created_at).toLocaleDateString('pt-BR', { day: 'numeric', month: 'long', year: 'numeric' }) })) : null,
+      ...(opts.extra || [])));
 }
 function openProfile(uid) {
   const ap = $('#app'); if (ap) ap.classList.remove('show-members');
@@ -1132,7 +1141,7 @@ function openProfile(uid) {
     const editable = canManage(sv);
     const draw = () => {
       const list = editable ? serverRoles(sv.id) : rolesOf(uid, sv.id);
-      rolesBox.replaceChildren(el('div', { class: 'label', text: 'Cargos em ' + sv.name }),
+      rolesBox.replaceChildren(el('h4', { text: 'Cargos em ' + sv.name }),
         el('div', { class: 'role-chips' }, list.length ? list.map(r => {
           const has = rolesOf(uid, sv.id).some(x => x.id === r.id);
           return el(editable ? 'button' : 'span', { class: 'role-chip' + (has ? ' on' : ''), style: `--rc:${r.color}`, title: editable ? (has ? 'Tirar cargo' : 'Dar cargo') : null,
@@ -1141,9 +1150,9 @@ function openProfile(uid) {
         }) : el('span', { class: 'muted', style: 'font-size:13px', text: editable ? 'Nenhum cargo criado ainda. Crie em Configurações do servidor → Cargos.' : 'Sem cargos.' })),
         editable && list.length ? el('small', { class: 'muted', text: 'Toque num cargo para dar ou tirar.' }) : null);
     };
-    rolesBox = el('div', { class: 'field', style: 'gap:8px' }); draw();
+    rolesBox = el('div', { class: 'pc-sec' }); draw();
   }
-  close = modal(p.display_name, el('div', { class: 'field', style: 'gap:14px' }, profileCard(p), rolesBox, acts));
+  close = modal(p.display_name, profileCard(p, { extra: [rolesBox, el('div', { class: 'pc-acts' }, acts)] }), { bare: true });
 }
 async function startDm(uid) {
   const { data, error } = await sb.rpc('open_dm', { other: uid });
@@ -1173,8 +1182,8 @@ function profileEditor() {
   const refresh = () => {
     const p = { ...draft };
     const card = profileCard({ ...p, avatar_path: files.avatar ? null : p.avatar_path, banner_path: files.banner ? null : p.banner_path });
-    if (files.avatar) { const av = card.querySelector('.avwrap .av span'); if (av) av.replaceWith(el('img', { src: URL.createObjectURL(files.avatar), alt: '' })); }
-    if (files.banner) card.querySelector('.banner').append(el('img', { src: URL.createObjectURL(files.banner), alt: '' }));
+    if (files.avatar) { const av = card.querySelector('.pc-av .av span'); if (av) av.replaceWith(el('img', { src: URL.createObjectURL(files.avatar), alt: '' })); }
+    if (files.banner) { const bn = card.querySelector('.pc-banner'); bn.style.background = ''; bn.append(el('img', { src: URL.createObjectURL(files.banner), alt: '' })); }
     preview.replaceChildren(card);
     drawCustom();
   };
@@ -1227,7 +1236,7 @@ function profileEditor() {
     busy(save, false, 'Salvar perfil');
   };
   refresh();
-  return el('div', { class: 'field', style: 'gap:14px' }, preview,
+  return el('div', { class: 'pe-grid' }, el('aside', { class: 'pe-preview' }, el('div', { class: 'label', text: 'Prévia' }), preview), el('div', { class: 'field pe-form', style: 'gap:14px' },
     el('div', { class: 'upload-row' },
       el('button', { class: 'btn small', text: 'Trocar foto', onclick: () => pick('avatar') }),
       el('button', { class: 'btn small ghost', text: 'Tirar foto', onclick: () => { files.avatar = null; draft.avatar_path = null; refresh(); } }),
@@ -1235,7 +1244,7 @@ function profileEditor() {
       el('button', { class: 'btn small ghost', text: 'Tirar banner', onclick: () => { files.banner = null; draft.banner_path = null; refresh(); } })),
     el('p', { class: 'muted', style: 'margin:0;font-size:13px', text: 'Foto e banner aceitam GIF animado (até 8 MB).' }),
     field('Nome de exibição', inp('display_name', 32)), field('Nome de usuário', inp('username', 24)),
-    field('Pronomes', inp('pronouns', 40)), field('Status', inp('status', 80)), field('Sobre mim', inp('bio', 300, true)), custom, err, save);
+    field('Pronomes', inp('pronouns', 40)), field('Status', inp('status', 80)), field('Sobre mim', inp('bio', 300, true)), custom, err, save));
 }
 function accountPanel() {
   const cur = el('input', { class: 'input', type: 'password', autocomplete: 'current-password' });
