@@ -1869,11 +1869,20 @@ function mentionPicker(ta, wrap, v) {
 
 
 /* ---------------- janelinha da transmissão (Picture-in-Picture) e mini-tela ---------------- */
+// transmissão ao vivo nunca fica pausada: o iPhone pausa o vídeo ao sair da tela cheia/janelinha ou do app
+function keepLive(v) {
+  if (v._live) return v; v._live = true;
+  const resume = () => { if (v.srcObject && v.isConnected) setTimeout(() => v.play().catch(() => {}), 60); };
+  ['pause', 'webkitendfullscreen', 'leavepictureinpicture', 'webkitpresentationmodechanged', 'stalled', 'suspend'].forEach(ev => v.addEventListener(ev, resume));
+  return v;
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) document.querySelectorAll('video').forEach(v => { if (v.srcObject && v.paused) v.play().catch(() => {}); }); });
+document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement) document.querySelectorAll('video').forEach(v => { if (v.srcObject && v.paused) v.play().catch(() => {}); }); });
 function screenVideo(uid, stream) {
   let v = V.screenVideos.get(uid);
   if (!v) {
     v = el('video', { autoplay: true, playsinline: '', autopictureinpicture: '' });
-    v.dataset.uid = uid;
+    v.dataset.uid = uid; keepLive(v);
     try { v.autoPictureInPicture = true; } catch {}
     v.addEventListener('leavepictureinpicture', () => { if (st.view && st.view.kind === 'room') renderRoom(); else renderMini(); });
     V.screenVideos.set(uid, v);
@@ -1978,13 +1987,13 @@ function renderRoom() {
   const addScreen = (stream, label, muted, uid) => {
     let v;
     if (uid) v = screenVideo(uid, stream);
-    else { v = el('video', { autoplay: true, playsinline: '' }); v.muted = muted; v.srcObject = stream; v.play().catch(() => {}); }
+    else { v = keepLive(el('video', { autoplay: true, playsinline: '' })); v.muted = muted; v.srcObject = stream; v.play().catch(() => {}); }
     const box = el('div', { class: 'screen' }, v, el('span', { class: 'tag', text: label }));
     if (uid && canPip(v)) box.append(el('button', { class: 'icon-btn pip-btn', 'aria-label': 'Janelinha flutuante', title: 'Janelinha flutuante (continua ao sair do app)', onclick: () => openPip(v) }, icon('i-pip')));
     if (uid) { const u = volOf('stream', uid);
       box.append(el('button', { class: 'screen-vol', 'aria-label': 'Volume da transmissão', title: 'Volume da transmissão', onclick: () => volumeSheet(uid, 'stream') },
         icon(u.mute ? 'i-mute' : 'i-speaker'), el('span', { text: u.mute ? 'Silenciado' : Math.round(u.v * 100) + '%' }))); }
-    box.append(el('button', { class: 'icon-btn full', 'aria-label': 'Tela cheia', onclick: () => (box.requestFullscreen ? box.requestFullscreen().catch(() => {}) : v.webkitEnterFullscreen && v.webkitEnterFullscreen()) }, icon('i-full')));
+    box.append(el('button', { class: 'icon-btn full', 'aria-label': 'Tela cheia', onclick: () => { if (box.requestFullscreen && document.fullscreenEnabled) box.requestFullscreen().catch(() => v.webkitEnterFullscreen && v.webkitEnterFullscreen()); else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen(); } }, icon('i-full')));
     screens.append(box);
   };
   if (here && V.screen) addScreen(V.screen, 'Sua tela', true);
