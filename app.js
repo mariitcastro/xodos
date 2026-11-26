@@ -1235,18 +1235,49 @@ function micConstraints(c) {
     channelCount: hq ? { ideal: 2 } : { ideal: 1 }, sampleRate: { ideal: 48000 }, sampleSize: { ideal: 16 } };
 }
 // microfone → volume → (portão de sensibilidade) → saída processada que vai para a chamada
+async function getMicRaw(c) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { const e = new Error('sem suporte'); e.name = 'NoSupport'; throw e; }
+  try { return await navigator.mediaDevices.getUserMedia({ audio: micConstraints(c) }); }
+  catch (e) {
+    if (e.name === 'NotAllowedError' || e.name === 'SecurityError') throw e;
+    return await navigator.mediaDevices.getUserMedia({ audio: true }); // tenta o microfone padrão, sem exigências
+  }
+}
+const rawChain = raw => ({ raw, stream: raw, gain: null, gate: null, an: null, open: true, bypass: true });
 async function buildMic() {
   const c = voiceCfg();
-  const raw = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(c) });
+  const raw = await getMicRaw(c);
   const a = ac();
-  const src = a.createMediaStreamSource(raw), gain = a.createGain(), gate = a.createGain(), an = a.createAnalyser(), dest = a.createMediaStreamDestination();
-  an.fftSize = 1024; gain.gain.value = c.inVol;
-  src.connect(gain); gain.connect(an); gain.connect(gate); gate.connect(dest);
-  return { raw, stream: dest.stream, gain, gate, an, buf: new Float32Array(1024), open: true, last: 0 };
+  if (!a) return rawChain(raw);
+  // no celular o "processador de áudio" pode estar dormindo: tenta acordar; se não der, manda a voz direto
+  try { if (a.state !== 'running') await Promise.race([a.resume(), new Promise(r => setTimeout(r, 800))]); } catch {}
+  if (a.state !== 'running') return rawChain(raw);
+  try {
+    const src = a.createMediaStreamSource(raw), gain = a.createGain(), gate = a.createGain(), an = a.createAnalyser(), dest = a.createMediaStreamDestination();
+    an.fftSize = 1024; gain.gain.value = c.inVol;
+    src.connect(gain); gain.connect(an); gain.connect(gate); gate.connect(dest);
+    if (!dest.stream.getAudioTracks().length) return rawChain(raw);
+    return { raw, stream: dest.stream, gain, gate, an, buf: new Float32Array(1024), open: true, last: 0 };
+  } catch { return rawChain(raw); }
+}
+function micErrorText(e) {
+  const n = e && e.name;
+  if (n === 'NotAllowedError' || n === 'SecurityError') return 'O navegador bloqueou o microfone. Toque no cadeado (ou "aA") ao lado do endereço → Permissões → Microfone → Permitir, e entre na sala de novo.';
+  if (n === 'NotFoundError' || n === 'OverconstrainedError') return 'Nenhum microfone encontrado. Confira se o fone está conectado ou escolha outro em Configurações → Voz e áudio.';
+  if (n === 'NotReadableError' || n === 'AbortError') return 'Outro app está usando o microfone (ligação, WhatsApp, gravador…). Feche ele e tente de novo.';
+  if (n === 'NoSupport') return 'Este navegador não deixa usar o microfone. No iPhone use o Safari; no Android, o Chrome.';
+  return 'Não consegui usar o microfone. Tente de novo, ou escolha outro em Configurações → Voz e áudio.';
 }
 function dbOf(node) { node.an.getFloatTimeDomainData(node.buf); let s = 0; for (const v of node.buf) s += v * v; return 20 * Math.log10(Math.sqrt(s / node.buf.length) + 1e-9); }
 setInterval(() => {
-  const n = V.chain; if (!n) return;
+  const n = V.chain; if (!n || n.bypass) return;
+  if (n.gate.context.state !== 'running') {
+    n.gate.context.resume().catch(() => {});
+    n.sleepSince = n.sleepSince || performance.now();
+    if (performance.now() - n.sleepSince > 2000 && !n.switching) { n.switching = true; useRawMic(); }
+    return;
+  }
+  n.sleepSince = 0;
   const c = V.cfg || voiceCfg(), db = dbOf(n), thr = c.gateAuto ? -52 : c.gate, now = performance.now();
   n.level = db;
   if (document.hidden) { if (!n.open) { n.open = true; n.gate.gain.setTargetAtTime(1, n.gate.context.currentTime, .01); } return; }
@@ -1267,9 +1298,21 @@ function applyOutput() {
   const els = [...V.audios.values(), ...document.querySelectorAll('.screen video')];
   for (const a of els) { a.volume = Math.min(1, c.outVol); if (c.output && canPickOutput()) a.setSinkId(c.output).catch(() => {}); }
 }
+async function useRawMic() {
+  const n = V.chain; if (!n || n.bypass) return;
+  const raw = rawChain(n.raw);
+  V.chain = raw; V.mic = raw.stream;
+  for (const call of V.calls.values()) {
+    if (call._kind !== 'voice' || !call.peerConnection) continue;
+    const out = V.mic.clone(); out.getTracks().forEach(t => t.enabled = call._ok ? !V.muted : false);
+    const sender = call.peerConnection.getSenders().find(x => x.track && x.track.kind === 'audio');
+    if (sender) { await sender.replaceTrack(out.getAudioTracks()[0]).catch(() => {}); call._out = out; }
+  }
+  delete meters[st.uid]; watch(V.mic, st.uid); applyMic();
+}
 async function swapMic() {
   if (!V.room) return;
-  let next; try { next = await buildMic(); } catch { return toast('Não consegui usar esse microfone.'); }
+  let next; try { next = await buildMic(); } catch (e) { return toast(micErrorText(e)); }
   const old = V.chain;
   V.chain = next; V.mic = next.stream; V.cfg = voiceCfg();
   for (const call of V.calls.values()) {
@@ -1279,13 +1322,13 @@ async function swapMic() {
     if (sender) { await sender.replaceTrack(out.getAudioTracks()[0]).catch(() => {}); if (call._out) call._out.getTracks().forEach(t => t.stop()); call._out = out; }
   }
   delete meters[st.uid]; watch(V.mic, st.uid); applyMic();
-  if (old) old.raw.getTracks().forEach(t => t.stop());
+  if (old && old.raw !== next.raw) old.raw.getTracks().forEach(t => t.stop());
 }
 function voicePanel() {
   let c = voiceCfg(), test = null, raf = 0;
   const box = el('div', { class: 'field', style: 'gap:14px' });
   const set = (k, v, rebuild) => { c[k] = v; saveVoiceCfg(c); V.cfg = c;
-    if (k === 'inVol') { if (V.chain) V.chain.gain.gain.value = v; if (test) test.gain.gain.value = v; }
+    if (k === 'inVol') { if (V.chain && V.chain.gain) V.chain.gain.gain.value = v; if (test && test.gain) test.gain.gain.value = v; }
     if (k === 'outVol' || k === 'output') applyOutput();
     if (rebuild) { if (V.room) swapMic(); if (test) startTest(); }
     draw(); };
@@ -1308,9 +1351,10 @@ function voicePanel() {
   const stopTest = () => { cancelAnimationFrame(raf); if (test) test.raw.getTracks().forEach(t => t.stop()); test = null; testBtn.textContent = '🎙️ Testar microfone'; meterFill.style.width = '0%'; };
   const startTest = async () => {
     if (test) test.raw.getTracks().forEach(t => t.stop());
-    try { test = await buildMic(); } catch { return toast('Não consegui usar o microfone. Libere o acesso no cadeado ao lado do endereço.'); }
+    try { test = await buildMic(); } catch (e) { return toast(micErrorText(e)); }
+    if (test.bypass) { const a = ac(); if (a) { const an = a.createAnalyser(); an.fftSize = 1024; try { a.createMediaStreamSource(test.raw).connect(an); } catch {} test.an = an; test.buf = new Float32Array(1024); } }
     await fillDevices(); testBtn.textContent = '⏹️ Parar teste';
-    const loop = () => { if (!test) return; const db = dbOf(test); const pct = Math.max(0, Math.min(100, (db + 90) / 90 * 100)); meterFill.style.width = pct + '%';
+    const loop = () => { if (!test) return; const db = test.an ? dbOf(test) : -90; const pct = Math.max(0, Math.min(100, (db + 90) / 90 * 100)); meterFill.style.width = pct + '%';
       const thr = c.gateAuto ? -52 : c.gate; meterFill.classList.toggle('open', db > thr); raf = requestAnimationFrame(loop); };
     loop();
   };
@@ -1341,7 +1385,7 @@ function voicePanel() {
       toggle('gateAuto', 'Automática', 'O microfone só manda som quando você fala.'),
       c.gateAuto ? null : range(-90, -10, 1, c.gate, v => v + ' dB', v => { c.gate = v; saveVoiceCfg(c); V.cfg = c; meterThr.style.left = ((v + 90) / 90 * 100) + '%'; }),
       el('h3', { class: 'section-title', text: 'Volume' }),
-      el('div', { class: 'field' }, el('span', { class: 'label', text: 'Volume do meu microfone' }), range(0, 2, .05, c.inVol, v => Math.round(v * 100) + '%', v => { c.inVol = v; saveVoiceCfg(c); V.cfg = c; if (V.chain) V.chain.gain.gain.value = v; if (test) test.gain.gain.value = v; })),
+      el('div', { class: 'field' }, el('span', { class: 'label', text: 'Volume do meu microfone' }), range(0, 2, .05, c.inVol, v => Math.round(v * 100) + '%', v => { c.inVol = v; saveVoiceCfg(c); V.cfg = c; if (V.chain && V.chain.gain) V.chain.gain.gain.value = v; if (test && test.gain) test.gain.gain.value = v; })),
       el('div', { class: 'field' }, el('span', { class: 'label', text: 'Volume das pessoas' }), range(0, 1, .05, c.outVol, v => Math.round(v * 100) + '%', v => { c.outVol = v; saveVoiceCfg(c); V.cfg = c; applyOutput(); })),
       el('p', { class: 'muted', style: 'margin:0;font-size:13px', text: 'As configurações ficam salvas neste aparelho e valem na hora, mesmo no meio da chamada.' }));
     if (!test) testBtn.textContent = '🎙️ Testar microfone';
@@ -1825,9 +1869,9 @@ function renderRoom() {
 async function joinRoom(id) {
   if (V.room === id) return openRoom(id);
   if (V.room) leaveRoom(true);
-  ac();
+  const a0 = ac(); if (a0 && a0.state !== 'running') a0.resume().catch(() => {});
   try { V.cfg = voiceCfg(); V.chain = await buildMic(); V.mic = V.chain.stream; }
-  catch { V.chain = null; return toast('Não consegui usar o microfone. Libere o acesso no cadeado ao lado do endereço, ou escolha outro em Configurações → Voz e áudio.'); }
+  catch (e) { V.chain = null; return actionSheet(micErrorText(e), [{ label: 'Tentar de novo', icon: 'i-mic', run: () => joinRoom(id) }, { label: 'Configurar voz', icon: 'i-gear', run: openVoiceSettings }]); }
   if (!V.peer || V.peer.destroyed || V.peer.disconnected) {
     const hex = [...rand(12)].map(n => n.toString(16).padStart(2, '0')).join('');
     V.peerId = 'xodos-' + hex;
