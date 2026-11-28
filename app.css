@@ -760,3 +760,7 @@ body { background: var(--bg-art); background-attachment: fixed; background-color
 .pe-preview { position: sticky; top: 72px; order: 2; display: flex; flex-direction: column; gap: 8px; }
 .pe-form { order: 1; min-width: 0; }
 @media (max-width: 860px) { .pe-grid { grid-template-columns: minmax(0, 1fr); } .pe-preview { position: static; order: 0; } }
+
+.pname { display: inline-block; max-width: 100%; vertical-align: bottom; padding: 0 .12em; margin: 0 -.12em; -webkit-box-decoration-break: clone; box-decoration-break: clone; overflow: visible; white-space: nowrap; }
+.tile b, .mem b, .me-bar b { overflow: hidden; text-overflow: ellipsis; }
+.tile b .pname, .mem b .pname, .me-bar b .pname { max-width: none; }

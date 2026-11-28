@@ -121,7 +121,7 @@ const FONTS = {
   mao: { label: 'À mão', g: 'Caveat:wght@700', fam: '"Caveat", cursive', size: 1.3 },
   redonda: { label: 'Arredondada', g: 'Comfortaa:wght@700', fam: '"Comfortaa", sans-serif' },
   retro: { label: 'Retrô', g: 'Lobster', fam: '"Lobster", cursive', size: 1.05 },
-  pixel: { label: 'Pixel', g: 'Press+Start+2P', fam: '"Press Start 2P", monospace', size: .62 },
+  pixel: { label: 'Pixel', g: 'Press+Start+2P', fam: '"Press Start 2P", monospace', size: .74 },
   forte: { label: 'Forte', g: 'Bungee', fam: '"Bungee", sans-serif', size: .9 }
 };
 const DECOS = { '': { label: 'Nenhuma', e: '' }, laco: { label: 'Laço', e: '🎀' }, coracoes: { label: 'Corações', e: '💗' }, brilhos: { label: 'Brilhos', e: '✨' }, coroa: { label: 'Coroa', e: '👑' }, flores: { label: 'Flores', e: '🌸' }, estrela: { label: 'Estrela', e: '⭐' } };
@@ -139,12 +139,14 @@ function loadFont(key) {
 function nameStyle(p, fallback) {
   const s = styleOf(p), f = FONTS[s.font], out = [];
   if (f.fam) { loadFont(s.font); out.push(`font-family:${f.fam}`); if (f.size) out.push(`font-size:${f.size}em`); if (f.italic) out.push('font-style:italic'); }
-  if (s.eff === 'gradient') out.push(`background:linear-gradient(90deg,${s.c1},${s.c2});-webkit-background-clip:text;background-clip:text;color:transparent`);
+  if (s.eff === 'gradient') out.push(`background-image:linear-gradient(90deg,${s.c1},${s.c2});-webkit-background-clip:text;background-clip:text;color:transparent;-webkit-text-fill-color:transparent`);
   else if (s.eff === 'glow') out.push(`color:${s.c1};text-shadow:0 0 6px ${s.c1}aa,0 0 14px ${s.c1}66`);
   else if (s.eff === 'solid') out.push(`color:${s.c1}`);
   else if (fallback) out.push(`color:${fallback}`);
   return out.join(';');
 }
+// nome estilizado numa camada própria (o Safari pinta o degradê na caixa toda se ela corta texto com "…")
+function nameNode(p, text, fallback) { return el('span', { class: 'pname', text: text != null ? text : (p ? p.display_name : 'Alguém'), style: nameStyle(p, fallback) }); }
 function avatarEl(p, size = 32, opts = {}) {
   const uid = p ? p.id : '';
   const d = el('div', { class: 'av', style: `--s:${size}px;--c:${colorFor(uid)}` });
@@ -616,7 +618,7 @@ function renderMeBar() {
   const me = st.profiles.get(st.uid) || st.me;
   $('#meBar').replaceChildren(
     el('div', { class: 'who', role: 'button', tabindex: '0', onclick: () => openProfile(st.uid) }, avatarEl(me, 34, { dot: true, speak: true }),
-      el('div', { class: 't' }, el('b', { text: me.display_name, style: nameStyle(me) }), el('small', { text: me.status || '@' + me.username }))),
+      el('div', { class: 't' }, el('b', {}, nameNode(me, me.display_name)), el('small', { text: me.status || '@' + me.username }))),
     el('button', { class: 'icon-btn', title: 'Configurações', 'aria-label': 'Configurações', onclick: () => openSettings() }, icon('i-gear')));
 }
 function renderMembers() {
@@ -625,7 +627,7 @@ function renderMembers() {
   const all = (sv ? serverMembers(sv) : members()).slice().sort((a, b) => a.display_name.localeCompare(b.display_name, 'pt-BR'));
   const on = all.filter(p => st.online.has(p.id)), off = all.filter(p => !st.online.has(p.id));
   const row = p => el('button', { class: 'mem' + (st.online.has(p.id) ? '' : ' off'), onclick: () => openProfile(p.id) }, avatarEl(p, 32, { dot: true }),
-    el('div', { class: 't' }, el('b', { style: nameStyle(p, sv ? userColor(p.id, sv.id) : null) }, p.display_name, owner ? (p.id === owner ? el('span', { class: 'crown', title: 'Dono do servidor', text: ' ♛' }) : null) : p.role === 'admin' ? el('span', { class: 'crown', title: 'Administração', text: ' ♛' }) : null), p.status ? el('small', { text: p.status }) : null));
+    el('div', { class: 't' }, el('b', {}, nameNode(p, p.display_name, sv ? userColor(p.id, sv.id) : null), owner ? (p.id === owner ? el('span', { class: 'crown', title: 'Dono do servidor', text: ' ♛' }) : null) : p.role === 'admin' ? el('span', { class: 'crown', title: 'Administração', text: ' ♛' }) : null), p.status ? el('small', { text: p.status }) : null));
   const bot = el('button', { class: 'mem', onclick: () => openProfile('kaka') }, avatarEl(KAKA, 32), el('div', { class: 't' }, el('b', {}, 'Kaká ', el('span', { class: 'bot-tag', text: 'BOT' })), el('small', { text: KAKA.status })));
   const kids = [el('div', { class: 'cat' }, 'Bots — 1'), bot];
   let rest = on;
@@ -727,7 +729,7 @@ function msgEl(m, prev) {
   if (replyId) row.append(replyRefEl(replyId, false, null));
   if (!dm && uid !== st.uid && repliesToMe(m)) row.classList.add('mentioned');
   if (first) row.append(el('div', { onclick: () => openProfile(uid) }, avatarEl(p, 42)), el('div', { class: 'meta' },
-    el('b', { text: p ? p.display_name : 'Alguém que saiu', style: nameStyle(p, dm ? nameColor(uid) : userColor(uid, (serverOf(m.channel_id) || {}).id)), onclick: () => openProfile(uid) }),
+    el('b', { onclick: () => openProfile(uid) }, nameNode(p, p ? p.display_name : 'Alguém que saiu', dm ? nameColor(uid) : userColor(uid, (serverOf(m.channel_id) || {}).id))),
     el('time', { text: fmtTime(m.created_at), datetime: m.created_at })));
   const body = el('div', { class: 'body' }), media = el('div', { class: 'media' });
   const fill = (text, imgUrlPromise, gif) => {
@@ -2094,7 +2096,7 @@ function renderRoom() {
   const tiles = el('div', { class: 'tiles' }, people.map(([uid, p]) => {
     const other = here && uid !== st.uid;
     return el(other ? 'button' : 'div', { class: 'tile' + (other ? ' clickable' : ''), 'data-speak-tile': uid, title: other ? 'Mudar o volume de ' + nameOf(uid) : null, onclick: other ? () => volumeSheet(uid, 'user') : null },
-      avatarEl(st.profiles.get(uid), 64, { speak: true }), el('b', { text: nameOf(uid), style: nameStyle(st.profiles.get(uid)) }),
+      avatarEl(st.profiles.get(uid), 64, { speak: true }), el('b', {}, nameNode(st.profiles.get(uid), nameOf(uid))),
       el('div', { class: 'flags' }, p.sharing ? el('span', { class: 'live', text: 'AO VIVO' }) : null, p.deaf ? icon('i-head-off') : p.muted ? icon('i-mic-off') : null, other ? volBadge('user', uid) : null),
       other ? el('small', { class: 'tile-hint', text: 'Toque para o volume' }) : null);
   }));
